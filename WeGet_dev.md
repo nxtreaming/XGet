@@ -52,41 +52,39 @@
 
 ## 技术架构设计
 
-### 核心技术栈选择
+### 🎯 技术核心技术栈选择（基于2025年最佳实践）
 
-**主要开发语言**: Python (推荐)
-- **核心爬虫框架**: twscrape + Scrapy
-- **浏览器自动化**: Playwright
-- **异步处理**: asyncio + aiohttp
-- **分布式调度**: Celery + Redis
+**核心技术栈** - Python 单栈方案：
+- **抓取引擎**: `twscrape` (主力) + `httpx` (网络层)
+- **动态渲染**: `Playwright` 池化服务
+- **异步框架**: `asyncio` + `uvloop` (高性能事件循环)
+- **任务调度**: `Celery` + `Redis` (≤千万条/日)
+- **API服务**: `FastAPI` + `Uvicorn`
+- **数据存储**: `MongoDB` (文档) + `Redis` (缓存/队列)
 
-**辅助技术栈**:
-- **Lua**: 配合Scrapy-Splash处理动态渲染
-- **C++**: libcurl实现高性能网络请求模块
-- **PHP**: 系统集成和API服务层
-
-### 系统架构图
+### 🏗️ 系统架构图
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   任务调度中心   │    │   Cookie池管理   │    │   代理IP池管理   │
-│   (Celery)     │    │   (Redis)      │    │   (Redis)      │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
-         ┌───────────────────────┼───────────────────────┐
-         │                       │                       │
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   爬虫节点 1     │    │   爬虫节点 2     │    │   爬虫节点 N     │
-│   (twscrape)   │    │   (Playwright)  │    │   (Custom)     │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         └───────────────────────┼───────────────────────┘
-                                 │
+┌─────────────────────────────────────────────────────────────┐
+│                    管理控制层                                │
+├─────────────────┬─────────────────┬─────────────────────────┤
+│   任务调度       │   账号池管理     │   代理池管理             │
+│   (Celery)      │   (Redis)      │   (Redis)              │
+└─────────────────┴─────────────────┴─────────────────────────┘
+                                │
+        ┌───────────────────────┼───────────────────────┐
+        │                       │                       │
+┌───────────────┐    ┌───────────────┐    ┌───────────────┐
+│  twscrape     │    │  Playwright   │    │  FastAPI      │
+│  爬虫节点      │    │  渲染池        │    │  API服务      │
+│  (httpx)      │    │  (Token刷新)   │    │  (数据接口)    │
+└───────────────┘    └───────────────┘    └───────────────┘
+        │                       │                       │
+        └───────────────────────┼───────────────────────┘
+                                │
                     ┌─────────────────┐
                     │   数据存储层     │
-                    │ (MongoDB/ES)   │
+                    │ MongoDB + Redis │
                     └─────────────────┘
 ```
 
@@ -161,9 +159,10 @@ htmlcov/
 Thumbs.db
 EOF
 
-# 安装核心依赖
-pip install twscrape scrapy playwright celery redis pymongo
+# 安装简化依赖栈
+pip install twscrape httpx playwright celery redis pymongo fastapi uvicorn uvloop
 playwright install chromium
+
 ```
 
 #### 1.2 Cookie池管理系统
@@ -526,196 +525,217 @@ class ProxyManager:
 
 ### 阶段二：核心采集模块开发 (2-3周)
 
-#### 2.1 搜索采集模块
+#### 2.1 简化搜索采集模块（基于twscrape）
+
 ```python
 # modules/search_scraper.py
-class TwitterSearchScraper:
-    def __init__(self, cookie_manager, proxy_manager):
-        self.cookie_mgr = cookie_manager
-        self.proxy_mgr = proxy_manager
-        
-    async def search_tweets(self, keyword, count=100):
-        """搜索推文"""
-        # 实现GraphQL SearchTimeline调用
-        query_variables = {
-            "rawQuery": keyword,
-            "count": count,
-            "querySource": "typed_query",
-            "product": "Latest"
-        }
-
-        # 这里应该调用GraphQL API
-        # 返回模拟数据结构
-        return {
-            "data": {
-                "search_by_raw_query": {
-                    "search_timeline": {
-                        "timeline": {
-                            "instructions": []
-                        }
-                    }
-                }
-            }
-        }
-
-    async def search_users(self, keyword):
-        """搜索用户"""
-        query_variables = {
-            "rawQuery": keyword,
-            "count": 20,
-            "querySource": "typed_query",
-            "product": "People"
-        }
-
-        # 返回用户搜索结果
-        return {
-            "data": {
-                "search_by_raw_query": {
-                    "search_timeline": {
-                        "timeline": {
-                            "instructions": []
-                        }
-                    }
-                }
-            }
-        }
-```
-
-#### 2.2 用户主页采集模块
-```python
-# modules/profile_scraper.py
-from typing import Dict, List, Optional
-from .base_scraper import TwitterBaseScraper
+import asyncio
 import logging
+from typing import Dict, List, Optional
+from twscrape import API, gather
+from twscrape.logger import set_log_level
+import httpx
 
 logger = logging.getLogger(__name__)
 
-class TwitterProfileScraper(TwitterBaseScraper):
-    """用户主页数据采集器"""
+class TwitterSearchScraper:
+    """基于twscrape的简化搜索采集器"""
+
+    def __init__(self, accounts_pool: List[Dict]):
+        self.api = API()
+        self.accounts_pool = accounts_pool
+        self._setup_accounts()
+
+    async def _setup_accounts(self):
+        """设置账号池"""
+        for account in self.accounts_pool:
+            await self.api.pool.add_account(
+                username=account['username'],
+                password=account['password'],
+                email=account['email'],
+                email_password=account['email_password']
+            )
+
+    async def search_tweets(self, keyword: str, count: int = 100) -> List[Dict]:
+        """搜索推文 - 直接使用twscrape的GraphQL接口"""
+        try:
+            tweets = []
+            async for tweet in self.api.search(keyword, limit=count):
+                tweet_data = {
+                    'id': tweet.id,
+                    'text': tweet.rawContent,
+                    'user': {
+                        'id': tweet.user.id,
+                        'username': tweet.user.username,
+                        'displayname': tweet.user.displayname,
+                        'followers_count': tweet.user.followersCount,
+                        'verified': tweet.user.verified
+                    },
+                    'created_at': tweet.date.isoformat(),
+                    'metrics': {
+                        'retweet_count': tweet.retweetCount,
+                        'like_count': tweet.likeCount,
+                        'reply_count': tweet.replyCount,
+                        'quote_count': tweet.quoteCount
+                    },
+                    'media': [{'url': m.url, 'type': m.type} for m in tweet.media] if tweet.media else [],
+                    'urls': [url.expandedUrl for url in tweet.urls] if tweet.urls else []
+                }
+                tweets.append(tweet_data)
+
+            logger.info(f"Collected {len(tweets)} tweets for keyword: {keyword}")
+            return tweets
+
+        except Exception as e:
+            logger.error(f"Failed to search tweets for '{keyword}': {str(e)}")
+            raise
+
+    async def search_users(self, keyword: str, count: int = 20) -> List[Dict]:
+        """搜索用户 - 使用twscrape用户搜索"""
+        try:
+            users = []
+            async for user in self.api.search_users(keyword, limit=count):
+                user_data = {
+                    'id': user.id,
+                    'username': user.username,
+                    'displayname': user.displayname,
+                    'description': user.description,
+                    'followers_count': user.followersCount,
+                    'following_count': user.followingCount,
+                    'tweets_count': user.statusesCount,
+                    'verified': user.verified,
+                    'created_at': user.created.isoformat() if user.created else None,
+                    'profile_image_url': user.profileImageUrl,
+                    'profile_banner_url': user.profileBannerUrl
+                }
+                users.append(user_data)
+
+            logger.info(f"Found {len(users)} users for keyword: {keyword}")
+            return users
+
+        except Exception as e:
+            logger.error(f"Failed to search users for '{keyword}': {str(e)}")
+            raise
+```
+
+#### 2.2 简化用户主页采集模块（基于twscrape）
+
+```python
+# modules/profile_scraper.py
+import asyncio
+import logging
+from typing import Dict, List, Optional
+from twscrape import API
+
+logger = logging.getLogger(__name__)
+
+class TwitterProfileScraper:
+    """基于twscrape的简化用户主页采集器"""
+
+    def __init__(self, api: API):
+        self.api = api
 
     async def get_user_info(self, username: str) -> Optional[Dict]:
-        """获取用户基础信息"""
+        """获取用户基础信息 - 使用twscrape内置方法"""
         try:
-            success = await self.navigate_to_page('profile_page', username=username)
-            if not success:
-                raise RuntimeError(f"Failed to navigate to profile page for {username}")
+            user = await self.api.user_by_login(username)
+            if not user:
+                logger.warning(f"User not found: {username}")
+                return None
 
-            # 等待页面加载
-            await asyncio.sleep(3)
-
-            # 提取用户信息
-            user_data = await self.extract_page_data('profile_page')
-
-            # 从拦截的API数据中获取更完整信息
-            api_data = await self.get_intercepted_data('browser_user_request')
-            if api_data:
-                user_data.update(self._parse_user_api_data(api_data['data']))
-
-            return user_data
+            return {
+                'id': user.id,
+                'username': user.username,
+                'displayname': user.displayname,
+                'description': user.description,
+                'followers_count': user.followersCount,
+                'following_count': user.followingCount,
+                'tweets_count': user.statusesCount,
+                'verified': user.verified,
+                'created_at': user.created.isoformat() if user.created else None,
+                'location': user.location,
+                'profile_image_url': user.profileImageUrl,
+                'profile_banner_url': user.profileBannerUrl,
+                'url': user.url,
+                'protected': user.protected
+            }
 
         except Exception as e:
             logger.error(f"Failed to get user info for {username}: {str(e)}")
             raise
 
     async def get_user_tweets(self, user_id: str, count: int = 200) -> List[Dict]:
-        """获取用户推文列表"""
+        """获取用户推文列表 - 使用twscrape内置方法"""
         try:
             tweets = []
-            collected = 0
+            async for tweet in self.api.user_tweets(int(user_id), limit=count):
+                tweet_data = {
+                    'id': tweet.id,
+                    'text': tweet.rawContent,
+                    'created_at': tweet.date.isoformat(),
+                    'metrics': {
+                        'retweet_count': tweet.retweetCount,
+                        'like_count': tweet.likeCount,
+                        'reply_count': tweet.replyCount,
+                        'quote_count': tweet.quoteCount
+                    },
+                    'media': [{'url': m.url, 'type': m.type} for m in tweet.media] if tweet.media else [],
+                    'urls': [url.expandedUrl for url in tweet.urls] if tweet.urls else [],
+                    'hashtags': [tag.text for tag in tweet.hashtags] if tweet.hashtags else [],
+                    'mentions': [mention.username for mention in tweet.mentions] if tweet.mentions else []
+                }
+                tweets.append(tweet_data)
 
-            while collected < count:
-                # 滚动加载更多推文
-                scroll_count = await self.scroll_and_load_more(max_scrolls=2)
-
-                # 提取当前页面的推文
-                page_tweets = await self.extract_page_data('profile_page')
-
-                # 去重并添加新推文
-                new_tweets = [t for t in page_tweets if t.get('tweet_id') not in {tweet.get('tweet_id') for tweet in tweets}]
-                tweets.extend(new_tweets)
-                collected = len(tweets)
-
-                if scroll_count == 0 or not new_tweets:
-                    break  # 无法继续滚动或没有新推文
-
-                await asyncio.sleep(2)
-
-            return tweets[:count]
+            logger.info(f"Collected {len(tweets)} tweets for user {user_id}")
+            return tweets
 
         except Exception as e:
             logger.error(f"Failed to get user tweets for {user_id}: {str(e)}")
             raise
 
-    async def get_user_media(self, user_id: str) -> List[Dict]:
-        """获取用户媒体内容"""
+    async def get_user_followers(self, user_id: str, count: int = 100) -> List[Dict]:
+        """获取用户关注者列表"""
         try:
-            # 导航到用户媒体页面
-            success = await self.navigate_to_page('profile_page', username=user_id)
-            if not success:
-                raise RuntimeError(f"Failed to navigate to media page for {user_id}")
+            followers = []
+            async for user in self.api.user_followers(int(user_id), limit=count):
+                follower_data = {
+                    'id': user.id,
+                    'username': user.username,
+                    'displayname': user.displayname,
+                    'followers_count': user.followersCount,
+                    'verified': user.verified,
+                    'profile_image_url': user.profileImageUrl
+                }
+                followers.append(follower_data)
 
-            # 点击媒体标签
-            media_tab = await self.page.wait_for_selector('a[href$="/media"]', timeout=5000)
-            if media_tab:
-                await media_tab.click()
-                await asyncio.sleep(2)
-
-            # 提取媒体内容
-            media_items = []
-            scroll_attempts = 0
-            max_scrolls = 5
-
-            while scroll_attempts < max_scrolls:
-                # 提取当前页面的媒体
-                media_elements = await self.page.query_selector_all('[data-testid="tweetPhoto"], [data-testid="videoPlayer"]')
-
-                for element in media_elements:
-                    try:
-                        media_data = await self._extract_media_from_element(element)
-                        if media_data and media_data not in media_items:
-                            media_items.append(media_data)
-                    except Exception as e:
-                        logger.warning(f"Failed to extract media: {str(e)}")
-
-                # 滚动加载更多
-                scroll_count = await self.scroll_and_load_more(max_scrolls=1)
-                if scroll_count == 0:
-                    break
-
-                scroll_attempts += 1
-                await asyncio.sleep(2)
-
-            return media_items
+            logger.info(f"Collected {len(followers)} followers for user {user_id}")
+            return followers
 
         except Exception as e:
-            logger.error(f"Failed to get user media for {user_id}: {str(e)}")
+            logger.error(f"Failed to get followers for user {user_id}: {str(e)}")
             raise
 
-    def _parse_user_api_data(self, api_data: Dict) -> Dict:
-        """解析用户API数据"""
+    async def get_user_following(self, user_id: str, count: int = 100) -> List[Dict]:
+        """获取用户关注列表"""
         try:
-            user_result = api_data.get('user', {}).get('result', {})
-            legacy = user_result.get('legacy', {})
+            following = []
+            async for user in self.api.user_following(int(user_id), limit=count):
+                following_data = {
+                    'id': user.id,
+                    'username': user.username,
+                    'displayname': user.displayname,
+                    'followers_count': user.followersCount,
+                    'verified': user.verified,
+                    'profile_image_url': user.profileImageUrl
+                }
+                following.append(following_data)
 
-            return {
-                'user_id': user_result.get('rest_id'),
-                'username': legacy.get('screen_name'),
-                'display_name': legacy.get('name'),
-                'description': legacy.get('description', ''),
-                'followers_count': legacy.get('followers_count', 0),
-                'following_count': legacy.get('friends_count', 0),
-                'tweet_count': legacy.get('statuses_count', 0),
-                'verified': legacy.get('verified', False),
-                'created_at': legacy.get('created_at'),
-                'location': legacy.get('location', ''),
-                'profile_image_url': legacy.get('profile_image_url_https', ''),
-                'profile_banner_url': legacy.get('profile_banner_url', ''),
-                'url': legacy.get('url', ''),
-                'protected': legacy.get('protected', False)
-            }
+            logger.info(f"Collected {len(following)} following for user {user_id}")
+            return following
+
         except Exception as e:
-            logger.warning(f"Failed to parse user API data: {str(e)}")
-            return {}
+            logger.error(f"Failed to get following for user {user_id}: {str(e)}")
+            raise
 ```
 
 #### 2.3 账号深度信息采集
@@ -10414,146 +10434,182 @@ class TestEndToEnd:
 
 ### 11. 用户API接口
 
-#### FastAPI服务
+#### 简化FastAPI服务（移除PHP依赖）
+
 ```python
 # api/main.py
-from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Any
-import jwt
+import asyncio
+import logging
 from datetime import datetime, timedelta
+from typing import List, Optional, Dict, Any
 
-app = FastAPI(title="WeGet Twitter Data Collection API", version="1.0.0")
-security = HTTPBearer()
+from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import uvicorn
 
-# 请求模型
-class SearchJobRequest(BaseModel):
+from core.tasks import search_tweets_task, get_user_profile_task
+from core.redis_manager import get_async_redis
+
+logger = logging.getLogger(__name__)
+
+# 简化的FastAPI应用
+app = FastAPI(
+    title="WeGet X Data Collection API",
+    version="2.0.0",
+    description="简化的Twitter数据采集API - 基于twscrape"
+)
+
+# CORS中间件
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 简化的请求模型
+class SearchRequest(BaseModel):
     keywords: List[str]
     count: int = 100
-    search_type: str = "Latest"
     priority: str = "normal"
 
-class ProfileJobRequest(BaseModel):
+class ProfileRequest(BaseModel):
     usernames: List[str]
     include_tweets: bool = True
     tweet_count: int = 200
-    priority: str = "normal"
 
-class TweetJobRequest(BaseModel):
-    tweet_ids: List[str]
-    include_replies: bool = True
-    max_replies: int = 100
-    priority: str = "normal"
-
-# 响应模型
-class JobResponse(BaseModel):
-    task_ids: List[str]
+class TaskResponse(BaseModel):
+    task_id: str
+    status: str
     submitted_at: str
     estimated_completion: str
 
 class TaskStatusResponse(BaseModel):
     task_id: str
-    task_type: str
     status: str
-    progress: Optional[Dict[str, Any]] = None
-    result: Optional[Dict[str, Any]] = None
-    created_at: str
-    completed_at: Optional[str] = None
+    progress: Optional[Dict] = None
+    result: Optional[Dict] = None
     error: Optional[str] = None
 
-# 认证依赖
-async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    """验证JWT令牌"""
+# 简化的API路由
+@app.post("/search", response_model=TaskResponse)
+async def submit_search_task(request: SearchRequest, background_tasks: BackgroundTasks):
+    """提交搜索任务 - 使用twscrape后端"""
     try:
-        payload = jwt.decode(
-            credentials.credentials,
-            SECRET_KEY,
-            algorithms=["HS256"]
-        )
-        username = payload.get("sub")
-        if username is None:
-            raise HTTPException(status_code=401, detail="Invalid token")
-        return username
-    except jwt.PyJWTError:
-        raise HTTPException(status_code=401, detail="Invalid token")
+        # 生成任务ID
+        task_id = f"search_{int(datetime.utcnow().timestamp())}"
 
-# API路由
-@app.post("/jobs/search", response_model=JobResponse)
-async def submit_search_jobs(
-    request: SearchJobRequest,
-    current_user: str = Depends(verify_token)
-):
-    """提交搜索采集任务"""
-    try:
-        scheduler = TaskScheduler(redis_client)
-        task_ids = scheduler.submit_search_jobs(
+        # 提交后台任务
+        background_tasks.add_task(
+            search_tweets_task.delay,
             keywords=request.keywords,
             count=request.count,
-            priority=request.priority
+            task_id=task_id
         )
 
         # 估算完成时间
-        estimated_completion = datetime.utcnow() + timedelta(minutes=len(task_ids) * 2)
+        estimated_completion = datetime.utcnow() + timedelta(minutes=len(request.keywords) * 2)
 
-        return JobResponse(
-            task_ids=task_ids,
+        return TaskResponse(
+            task_id=task_id,
+            status="submitted",
             submitted_at=datetime.utcnow().isoformat(),
             estimated_completion=estimated_completion.isoformat()
         )
 
     except Exception as e:
+        logger.error(f"Failed to submit search task: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/jobs/profile", response_model=JobResponse)
-async def submit_profile_jobs(
-    request: ProfileJobRequest,
-    current_user: str = Depends(verify_token)
-):
-    """提交用户主页采集任务"""
+@app.post("/profile", response_model=TaskResponse)
+async def submit_profile_task(request: ProfileRequest, background_tasks: BackgroundTasks):
+    """提交用户资料采集任务"""
     try:
-        scheduler = TaskScheduler(redis_client)
-        task_ids = scheduler.submit_profile_jobs(
+        task_id = f"profile_{int(datetime.utcnow().timestamp())}"
+
+        background_tasks.add_task(
+            get_user_profile_task.delay,
             usernames=request.usernames,
             include_tweets=request.include_tweets,
-            priority=request.priority
+            tweet_count=request.tweet_count,
+            task_id=task_id
         )
 
-        estimated_completion = datetime.utcnow() + timedelta(minutes=len(task_ids) * 3)
+        estimated_completion = datetime.utcnow() + timedelta(minutes=len(request.usernames) * 3)
 
-        return JobResponse(
-            task_ids=task_ids,
+        return TaskResponse(
+            task_id=task_id,
+            status="submitted",
             submitted_at=datetime.utcnow().isoformat(),
             estimated_completion=estimated_completion.isoformat()
         )
 
     except Exception as e:
+        logger.error(f"Failed to submit profile task: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.post("/jobs/tweet", response_model=JobResponse)
-async def submit_tweet_jobs(
-    request: TweetJobRequest,
-    current_user: str = Depends(verify_token)
-):
-    """提交推文采集任务"""
+@app.get("/task/{task_id}", response_model=TaskStatusResponse)
+async def get_task_status(task_id: str):
+    """获取任务状态"""
     try:
-        scheduler = TaskScheduler(redis_client)
-        task_ids = scheduler.submit_tweet_jobs(
-            tweet_ids=request.tweet_ids,
-            include_replies=request.include_replies,
-            priority=request.priority
-        )
+        redis_client = await get_async_redis()
 
-        estimated_completion = datetime.utcnow() + timedelta(minutes=len(task_ids) * 2)
+        # 从Redis获取任务状态
+        task_data = await redis_client.hgetall(f"task:{task_id}")
 
-        return JobResponse(
-            task_ids=task_ids,
-            submitted_at=datetime.utcnow().isoformat(),
-            estimated_completion=estimated_completion.isoformat()
+        if not task_data:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        return TaskStatusResponse(
+            task_id=task_id,
+            status=task_data.get(b'status', b'unknown').decode(),
+            progress=eval(task_data.get(b'progress', b'{}').decode()) if task_data.get(b'progress') else None,
+            result=eval(task_data.get(b'result', b'{}').decode()) if task_data.get(b'result') else None,
+            error=task_data.get(b'error', b'').decode() if task_data.get(b'error') else None
         )
 
     except Exception as e:
+        logger.error(f"Failed to get task status: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/health")
+async def health_check():
+    """健康检查端点"""
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+
+@app.get("/stats")
+async def get_stats():
+    """获取系统统计信息"""
+    try:
+        redis_client = await get_async_redis()
+
+        # 获取基本统计
+        stats = {
+            "active_tasks": await redis_client.scard("tasks:active"),
+            "completed_tasks": await redis_client.scard("tasks:completed"),
+            "failed_tasks": await redis_client.scard("tasks:failed"),
+            "available_accounts": await redis_client.scard("accounts:available"),
+            "healthy_proxies": await redis_client.scard("proxies:healthy")
+        }
+
+        return stats
+
+    except Exception as e:
+        logger.error(f"Failed to get stats: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# 启动配置
+if __name__ == "__main__":
+    uvicorn.run(
+        "api.main:app",
+        host="0.0.0.0",
+        port=8000,
+        reload=True,
+        loop="uvloop"  # 使用高性能事件循环
+    )
+```
 
 @app.get("/jobs/{task_id}", response_model=TaskStatusResponse)
 async def get_task_status(

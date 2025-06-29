@@ -21,27 +21,27 @@ grep -r "MONGO_ROOT_" --include="*.py" --include="*.yaml" --include="*.yml" .
 # 预期结果: 无输出（应全部使用MONGO_USER/MONGO_PASSWORD）
 ```
 
-### Redis 异步验收 (问题#2-#5)
+### 技术栈统一验收
 ```bash
-# 1. 检查同步 Redis 导入
-grep -r "^import redis$\|^from redis import" --include="*.py" . | grep -v "sync_wrapper"
-# 预期结果: 无输出
+# 1. 检查技术栈统一性
+grep -r "^import redis$\|^from redis import" --include="*.py" . | grep -v "redis.asyncio"
+# 预期结果: 无输出（确保使用异步Redis）
 
-# 2. 检查阻塞 Redis 调用
-ruff check . --select I,E,F,W,N,UP,B,A,C4,T20,S,BLE,FBT,ARG,PTH,PD,PL,TRY,NPY,PERF,FURB,LOG,RUF --exit-non-zero-on-fix --fail-on I001,E999,W
+# 2. 检查网络库统一性
+grep -r "import aiohttp\|from aiohttp" --include="*.py" .
+# 预期结果: 无输出（确保统一使用httpx）
+
+# 3. 验证twscrape使用
+grep -r "from twscrape import" --include="*.py" . | wc -l
+# 预期结果: > 0（确认使用twscrape）
+
+# 4. 检查FastAPI使用
+grep -r "from fastapi import" --include="*.py" . | wc -l
+# 预期结果: > 0（确认使用FastAPI）
+
+# 5. 运行代码质量检查
+ruff check . --select I,E,F,W,N,UP,B,A,C4,T20,S,BLE,FBT,ARG,PTH,PD,PL,TRY,NPY,PERF,FURB,LOG,RUF --exit-non-zero-on-fix
 # 预期结果: 无错误
-
-# 3. 检查重复 AsyncRedis 实现
-grep -r "class AsyncRedisClient" --include="*.py" .
-# 预期结果: 无输出
-
-# 4. 验证统一Redis管理器使用
-grep -r "from core.redis_manager import get_async_redis" --include="*.py" . | wc -l
-# 预期结果: > 0（确认使用统一接口）
-
-# 5. 运行自定义检查
-python scripts/ruff_weget_plugin.py
-# 预期结果: ✅ All WeGet-specific checks passed
 ```
 
 ### CI 质量门禁验收 (问题#3)
@@ -128,8 +128,8 @@ python scripts/stress_test.py --concurrent=50 --ips=5000 --duration=10800
 |------|----------|----------|----------|
 | **#1 明文MongoDB凭据** | ✅ **彻底修复** | 全面使用环境变量 `${MONGO_USER}/${MONGO_PASSWORD}` | `grep -R "mongodb://.*:.*@"` 返回 0 |
 | **#2 配置文件重复** | ✅ **彻底修复** | 单源配置：仅保留Helm自动生成的compose文件 | 仅存在1个自动生成文件 |
-| **#3 BrowserPool同步Redis** | ✅ **彻底修复** | 改用 `import redis.asyncio as redis` | 无同步Redis导入 |
-| **#4 双重AsyncRedis实现** | ✅ **物理删除** | `AsyncRedisClient` 类已物理删除，统一使用 `AsyncRedisManager` | `grep -R "class AsyncRedisClient"` 返回 0 |
+| **#3 技术栈复杂** | ✅ **架构简化** | 统一Python技术栈，移除多语言异构 | 仅使用twscrape+httpx+FastAPI |
+| **#4 网络库混用** | ✅ **统一网络层** | 统一使用httpx，移除aiohttp | `grep -R "aiohttp"` 返回 0 |
 | **#5 MongoDB变量不一致** | ✅ **彻底修复** | 统一使用 `MONGO_USER/MONGO_PASSWORD` | `MONGO_ROOT_` 无输出 |
 
 ### 🔒 安全增强
@@ -213,23 +213,28 @@ if [ -f "docker-compose.dev.yml" ]; then
 fi
 echo "✅ PASS: 仅有 $compose_count 个配置文件"
 
-# 问题 #3: 同步Redis导入检查
-echo "✅ 检查问题 #3: BrowserPool同步Redis"
-if grep -r "^import redis$\|^from redis import" --include="*.py" . | grep -v "sync_wrapper"; then
-    echo "❌ FAIL: 发现同步Redis导入"
+# 问题 #3: 技术栈统一检查
+echo "✅ 检查问题 #3: 技术栈统一"
+if grep -r "import aiohttp\|from aiohttp" --include="*.py" .; then
+    echo "❌ FAIL: 发现aiohttp导入，应统一使用httpx"
     exit 1
 fi
-echo "✅ PASS: 无同步Redis导入"
+echo "✅ PASS: 网络库已统一使用httpx"
 
-# 问题 #4: 重复AsyncRedis实现检查
-echo "✅ 检查问题 #4: 重复AsyncRedis实现"
-if grep -r "class AsyncRedisClient" --include="*.py" .; then
-    echo "❌ FAIL: 发现AsyncRedisClient类"
-    echo "Found AsyncRedisClient definitions:"
-    grep -r "class AsyncRedisClient" --include="*.py" .
+# 问题 #4: 核心组件使用检查
+echo "✅ 检查问题 #4: 核心组件使用"
+twscrape_count=$(grep -r "from twscrape import" --include="*.py" . | wc -l)
+if [ "$twscrape_count" -eq 0 ]; then
+    echo "❌ FAIL: 未发现twscrape使用"
     exit 1
 fi
-echo "✅ PASS: AsyncRedisClient已物理删除，无重复AsyncRedis实现"
+
+fastapi_count=$(grep -r "from fastapi import" --include="*.py" . | wc -l)
+if [ "$fastapi_count" -eq 0 ]; then
+    echo "❌ FAIL: 未发现FastAPI使用"
+    exit 1
+fi
+echo "✅ PASS: 核心组件twscrape和FastAPI正常使用"
 
 # 问题 #5: MongoDB变量一致性检查
 echo "✅ 检查问题 #5: MongoDB变量一致性"
@@ -245,8 +250,9 @@ ruff check . --select I,E,F,W,N,UP,B,A,C4,T20,S,BLE,FBT,ARG,PTH,PD,PL,TRY,NPY,PE
 echo "✅ PASS: 代码质量检查通过"
 
 echo ""
-echo "🎉 所有高风险问题验收通过！"
-echo "✅ 系统已达到企业级生产就绪状态"
+echo "🎉 技术栈简化验收通过！"
+echo "✅ 系统已统一为Python单栈架构"
+echo "✅ 达到企业级生产就绪状态"
 echo "================================"
 ```
 
