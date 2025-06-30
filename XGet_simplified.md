@@ -1623,51 +1623,855 @@ class AccountManagerSummary:
         ]
 ```
 
-### 3. 代理管理模块
+### 3. 代理管理模块 - SOCKS5专用版
 
 ```python
 # core/proxy_manager.py
+import asyncio
 import aiohttp
+import aiosocks
 import random
-from typing import Dict, List, Optional
+import json
+import logging
+import time
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime, timedelta
+from enum import Enum
+from dataclasses import dataclass, asdict
+import redis.asyncio as redis
 
-class ProxyManager:
-    """代理IP管理器"""
+class ProxyProtocol(Enum):
+    """代理协议类型"""
+    SOCKS5 = "socks5"
+    SOCKS4 = "socks4"
+    HTTP = "http"
+    HTTPS = "https"
+
+class ProxyStatus(Enum):
+    """代理状态"""
+    ACTIVE = "active"           # 活跃可用
+    INACTIVE = "inactive"       # 不活跃
+    ERROR = "error"            # 错误状态
+    TESTING = "testing"        # 测试中
+    BANNED = "banned"          # 被封禁
+    MAINTENANCE = "maintenance" # 维护中
+
+class ProxyRegion(Enum):
+    """代理地区"""
+    US = "us"          # 美国
+    EU = "eu"          # 欧洲
+    ASIA = "asia"      # 亚洲
+    GLOBAL = "global"  # 全球
+
+@dataclass
+class ProxyMetrics:
+    """代理指标数据"""
+    total_requests: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+    timeout_requests: int = 0
+    banned_requests: int = 0
+    last_used: Optional[datetime] = None
+    last_success: Optional[datetime] = None
+    last_error: Optional[datetime] = None
+    consecutive_errors: int = 0
+    average_response_time: float = 0.0
+    daily_usage: int = 0
+    weekly_usage: int = 0
+
+    @property
+    def success_rate(self) -> float:
+        """成功率计算"""
+        if self.total_requests == 0:
+            return 1.0
+        return self.successful_requests / self.total_requests
+
+    @property
+    def health_score(self) -> float:
+        """健康分数计算 (0-1)"""
+        base_score = self.success_rate
+
+        # 连续错误惩罚
+        error_penalty = min(self.consecutive_errors * 0.15, 0.6)
+
+        # 响应时间因子
+        time_factor = 1.0
+        if self.average_response_time > 5.0:  # 超过5秒响应时间
+            time_factor = 0.7
+        elif self.average_response_time > 3.0:  # 超过3秒
+            time_factor = 0.85
+
+        # 使用频率调整
+        usage_factor = 1.0
+        if self.daily_usage > 800:  # 接近限制时降低分数
+            usage_factor = 0.8
+        elif self.daily_usage > 600:
+            usage_factor = 0.9
+
+        return max(0.0, (base_score - error_penalty) * time_factor * usage_factor)
+
+@dataclass
+class ProxyConfig:
+    """SOCKS5代理配置"""
+    proxy_id: str
+    host: str
+    port: int
+    username: str
+    password: str
+    protocol: ProxyProtocol = ProxyProtocol.SOCKS5
+    region: ProxyRegion = ProxyRegion.GLOBAL
+    status: ProxyStatus = ProxyStatus.ACTIVE
+    max_concurrent: int = 10
+    daily_limit: int = 1000
+    max_consecutive_errors: int = 5
+    timeout_seconds: int = 10
+    provider: str = "unknown"
+    cost_per_gb: float = 0.0
+    expires_at: Optional[datetime] = None
+    tags: List[str] = None
+
+    def __post_init__(self):
+        if self.tags is None:
+            self.tags = []
+
+    @property
+    def proxy_url(self) -> str:
+        """生成代理URL"""
+        if self.protocol == ProxyProtocol.SOCKS5:
+            return f"socks5://{self.username}:{self.password}@{self.host}:{self.port}"
+        elif self.protocol == ProxyProtocol.HTTP:
+            return f"http://{self.username}:{self.password}@{self.host}:{self.port}"
+        else:
+            return f"{self.protocol.value}://{self.username}:{self.password}@{self.host}:{self.port}"
+
+    @property
+    def connection_info(self) -> Dict:
+        """获取连接信息"""
+        return {
+            'proxy_type': aiosocks.SOCKS5 if self.protocol == ProxyProtocol.SOCKS5 else aiosocks.SOCKS4,
+            'addr': self.host,
+            'port': self.port,
+            'username': self.username,
+            'password': self.password
+        }
+
+class ProductionProxyManager:
+    """生产级SOCKS5代理管理器"""
 
     def __init__(self, redis_client: redis.Redis):
         self.redis = redis_client
+        self.logger = logging.getLogger(__name__)
 
-    async def get_proxy(self) -> Optional[Dict]:
-        """获取可用代理"""
+        # 配置参数
+        self.health_threshold = 0.7
+        self.max_concurrent_per_proxy = 10
+        self.health_check_interval = 300  # 5分钟
+        self.test_urls = [
+            'https://httpbin.org/ip',
+            'https://api.ipify.org?format=json',
+            'https://ifconfig.me/ip'
+        ]
+
+        # 性能统计
+        self.response_times = {}
+
+    async def initialize(self):
+        """初始化代理管理器"""
+        await self._setup_redis_structures()
+        self.logger.info("Proxy manager initialized")
+
+    async def _setup_redis_structures(self):
+        """设置Redis数据结构"""
+        await self.redis.sadd('proxy_manager:initialized', '1')
+
+    async def add_proxy_batch(self, proxy_list: List[Dict]) -> Dict[str, bool]:
+        """批量添加SOCKS5代理"""
+        results = {}
+
+        for proxy_data in proxy_list:
+            try:
+                proxy_config = ProxyConfig(
+                    proxy_id=f"socks5_{proxy_data['host']}_{proxy_data['port']}",
+                    host=proxy_data['host'],
+                    port=int(proxy_data['port']),
+                    username=proxy_data['username'],
+                    password=proxy_data['password'],
+                    protocol=ProxyProtocol.SOCKS5,
+                    region=ProxyRegion(proxy_data.get('region', 'global')),
+                    provider=proxy_data.get('provider', 'unknown'),
+                    cost_per_gb=float(proxy_data.get('cost_per_gb', 0.0)),
+                    tags=proxy_data.get('tags', [])
+                )
+
+                success = await self._add_single_proxy(proxy_config)
+                results[proxy_config.proxy_id] = success
+
+            except Exception as e:
+                self.logger.error(f"Failed to add proxy {proxy_data}: {e}")
+                results[f"error_{proxy_data.get('host', 'unknown')}"] = False
+
+        self.logger.info(f"Batch add completed: {sum(results.values())}/{len(proxy_list)} successful")
+        return results
+
+    async def _add_single_proxy(self, config: ProxyConfig) -> bool:
+        """添加单个代理"""
         try:
-            healthy_proxies = await self.redis.smembers('proxies:healthy')
-            if not healthy_proxies:
+            # 保存代理配置
+            await self._save_proxy_config(config)
+
+            # 初始化指标
+            await self._initialize_proxy_metrics(config.proxy_id)
+
+            # 执行初始健康检查
+            is_healthy = await self._test_proxy_connection(config)
+
+            if is_healthy:
+                await self._update_proxy_status(config.proxy_id, ProxyStatus.ACTIVE)
+                self.logger.info(f"Proxy {config.proxy_id} added and verified")
+            else:
+                await self._update_proxy_status(config.proxy_id, ProxyStatus.ERROR)
+                self.logger.warning(f"Proxy {config.proxy_id} added but failed initial test")
+
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to add proxy {config.proxy_id}: {e}")
+            return False
+
+    async def get_available_proxy(self,
+                                region: Optional[ProxyRegion] = None,
+                                tags: Optional[List[str]] = None,
+                                exclude_proxies: Optional[List[str]] = None,
+                                min_health_score: float = 0.7) -> Optional[Dict]:
+        """获取可用代理 - 智能选择算法"""
+        try:
+            # 获取候选代理
+            candidates = await self._get_candidate_proxies(region, tags, exclude_proxies, min_health_score)
+
+            if not candidates:
+                self.logger.warning("No candidate proxies available")
                 return None
 
-            proxy_id = random.choice(list(healthy_proxies)).decode()
-            proxy_config = await self.redis.hget(f'proxy:{proxy_id}', 'config')
+            # 智能选择最佳代理
+            best_proxy = await self._select_best_proxy(candidates)
 
-            if proxy_config:
-                return json.loads(proxy_config)
+            if best_proxy:
+                # 更新使用记录
+                await self._record_proxy_usage(best_proxy['proxy_id'])
+
+                # 返回连接信息
+                return {
+                    'proxy_id': best_proxy['proxy_id'],
+                    'proxy_url': best_proxy['config'].proxy_url,
+                    'connection_info': best_proxy['config'].connection_info,
+                    'health_score': best_proxy['metrics'].health_score,
+                    'region': best_proxy['config'].region.value,
+                    'response_time': best_proxy['metrics'].average_response_time
+                }
+
             return None
 
         except Exception as e:
-            logging.error(f"Failed to get proxy: {str(e)}")
+            self.logger.error(f"Failed to get available proxy: {e}")
             return None
 
-    async def check_proxy_health(self, proxy: Dict) -> bool:
-        """检查代理健康状态"""
+    async def _get_candidate_proxies(self,
+                                   region: Optional[ProxyRegion],
+                                   tags: Optional[List[str]],
+                                   exclude_proxies: Optional[List[str]],
+                                   min_health_score: float) -> List[Dict]:
+        """获取候选代理列表"""
+        candidates = []
+
+        # 获取所有活跃代理
+        active_proxies = await self.redis.smembers('proxies:active')
+
+        for proxy_id in active_proxies:
+            proxy_id = proxy_id.decode()
+
+            # 排除指定代理
+            if exclude_proxies and proxy_id in exclude_proxies:
+                continue
+
+            # 检查代理配置
+            config = await self._get_proxy_config(proxy_id)
+            if not config:
+                continue
+
+            # 地区过滤
+            if region and config.region != region:
+                continue
+
+            # 标签过滤
+            if tags and not any(tag in config.tags for tag in tags):
+                continue
+
+            # 检查并发限制
+            current_usage = await self._get_current_concurrent_usage(proxy_id)
+            if current_usage >= config.max_concurrent:
+                continue
+
+            # 检查使用限制
+            if await self._is_proxy_over_limit(proxy_id):
+                continue
+
+            # 获取代理指标
+            metrics = await self._get_proxy_metrics(proxy_id)
+
+            # 健康分数过滤
+            if metrics.health_score < min_health_score:
+                continue
+
+            candidates.append({
+                'proxy_id': proxy_id,
+                'config': config,
+                'metrics': metrics,
+                'current_usage': current_usage
+            })
+
+        return candidates
+
+    async def _select_best_proxy(self, candidates: List[Dict]) -> Optional[Dict]:
+        """选择最佳代理 - 综合评分算法"""
+        if not candidates:
+            return None
+
+        # 计算综合评分
+        for candidate in candidates:
+            score = await self._calculate_proxy_score(candidate)
+            candidate['final_score'] = score
+
+        # 按评分排序，选择最高分
+        candidates.sort(key=lambda x: x['final_score'], reverse=True)
+
+        return candidates[0]
+
+    async def _calculate_proxy_score(self, candidate: Dict) -> float:
+        """计算代理综合评分"""
+        config = candidate['config']
+        metrics = candidate['metrics']
+        current_usage = candidate['current_usage']
+
+        # 基础健康分数 (40%)
+        health_score = metrics.health_score * 0.4
+
+        # 响应时间分数 (25%) - 响应时间越短分数越高
+        max_acceptable_time = 5.0  # 5秒
+        time_score = max(0, (max_acceptable_time - metrics.average_response_time) / max_acceptable_time) * 0.25
+
+        # 使用频率分数 (20%) - 使用越少分数越高
+        usage_ratio = metrics.daily_usage / config.daily_limit
+        usage_score = (1 - usage_ratio) * 0.2
+
+        # 并发使用分数 (15%) - 并发越少分数越高
+        concurrent_ratio = current_usage / config.max_concurrent
+        concurrent_score = (1 - concurrent_ratio) * 0.15
+
+        return health_score + time_score + usage_score + concurrent_score
+
+    async def _test_proxy_connection(self, config: ProxyConfig) -> bool:
+        """测试SOCKS5代理连接"""
         try:
-            timeout = aiohttp.ClientTimeout(total=10)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(
-                    'https://httpbin.org/ip',
-                    proxy=proxy['url']
-                ) as response:
-                    return response.status == 200
-        except:
+            start_time = time.time()
+
+            # 使用aiosocks进行SOCKS5连接测试
+            conn_info = config.connection_info
+
+            # 测试连接到目标URL
+            test_url = random.choice(self.test_urls)
+
+            async with aiosocks.Socks5Connector(
+                proxy_host=conn_info['addr'],
+                proxy_port=conn_info['port'],
+                username=conn_info['username'],
+                password=conn_info['password']
+            ) as connector:
+
+                timeout = aiohttp.ClientTimeout(total=config.timeout_seconds)
+                async with aiohttp.ClientSession(
+                    connector=connector,
+                    timeout=timeout
+                ) as session:
+
+                    async with session.get(test_url) as response:
+                        if response.status == 200:
+                            response_time = time.time() - start_time
+                            await self._update_response_time(config.proxy_id, response_time)
+                            return True
+                        else:
+                            return False
+
+        except asyncio.TimeoutError:
+            self.logger.warning(f"Proxy {config.proxy_id} timeout during test")
             return False
-```
+        except Exception as e:
+            self.logger.warning(f"Proxy {config.proxy_id} test failed: {e}")
+            return False
+
+    async def update_proxy_success(self, proxy_id: str, response_time: float = 0.0):
+        """更新代理成功记录"""
+        try:
+            current_time = datetime.utcnow()
+
+            # 更新基础指标
+            await self.redis.hincrby(f'proxy:{proxy_id}:metrics', 'total_requests', 1)
+            await self.redis.hincrby(f'proxy:{proxy_id}:metrics', 'successful_requests', 1)
+            await self.redis.hset(f'proxy:{proxy_id}:metrics', 'last_success', current_time.isoformat())
+            await self.redis.hset(f'proxy:{proxy_id}:metrics', 'consecutive_errors', 0)
+
+            # 更新响应时间
+            if response_time > 0:
+                await self._update_response_time(proxy_id, response_time)
+
+            # 更新使用计数
+            await self._update_usage_counters(proxy_id)
+
+            # 尝试恢复代理状态
+            await self._try_proxy_recovery(proxy_id)
+
+            self.logger.debug(f"Proxy {proxy_id} success updated")
+
+        except Exception as e:
+            self.logger.error(f"Failed to update proxy success: {e}")
+
+    async def mark_proxy_error(self, proxy_id: str, error: str, error_type: str = "general"):
+        """标记代理错误"""
+        try:
+            current_time = datetime.utcnow()
+
+            # 更新错误指标
+            await self.redis.hincrby(f'proxy:{proxy_id}:metrics', 'total_requests', 1)
+            await self.redis.hincrby(f'proxy:{proxy_id}:metrics', 'failed_requests', 1)
+            await self.redis.hincrby(f'proxy:{proxy_id}:metrics', 'consecutive_errors', 1)
+            await self.redis.hset(f'proxy:{proxy_id}:metrics', 'last_error', current_time.isoformat())
+
+            # 处理特定错误类型
+            await self._handle_specific_proxy_errors(proxy_id, error, error_type)
+
+            # 检查是否需要暂停代理
+            consecutive_errors = await self.redis.hget(f'proxy:{proxy_id}:metrics', 'consecutive_errors')
+            if consecutive_errors and int(consecutive_errors) >= 5:
+                await self._suspend_proxy(proxy_id, f"Too many consecutive errors: {consecutive_errors}")
+
+            self.logger.warning(f"Proxy {proxy_id} error marked: {error_type} - {error}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to mark proxy error: {e}")
+
+    async def _handle_specific_proxy_errors(self, proxy_id: str, error: str, error_type: str):
+        """处理特定类型的代理错误"""
+        error_lower = error.lower()
+
+        if 'timeout' in error_lower or 'connection timeout' in error_lower:
+            # 超时错误
+            await self.redis.hincrby(f'proxy:{proxy_id}:metrics', 'timeout_requests', 1)
+
+        elif 'banned' in error_lower or 'blocked' in error_lower or '403' in error:
+            # 被封禁错误
+            await self.redis.hincrby(f'proxy:{proxy_id}:metrics', 'banned_requests', 1)
+            await self._suspend_proxy(proxy_id, f"Proxy appears to be banned: {error}")
+
+        elif 'authentication' in error_lower or 'auth' in error_lower:
+            # 认证错误 - 可能用户名密码有问题
+            await self._mark_proxy_auth_error(proxy_id, error)
+
+        elif 'connection refused' in error_lower or 'unreachable' in error_lower:
+            # 连接被拒绝 - 代理服务器可能下线
+            await self._suspend_proxy(proxy_id, f"Proxy server unreachable: {error}")
+
+    async def batch_health_check(self) -> Dict:
+        """批量健康检查"""
+        try:
+            results = {
+                'checked': 0,
+                'healthy': 0,
+                'unhealthy': 0,
+                'recovered': 0,
+                'suspended': 0,
+                'details': []
+            }
+
+            all_proxies = await self.redis.smembers('proxies:all')
+
+            # 并发检查代理健康状态
+            tasks = []
+            for proxy_id in all_proxies:
+                proxy_id = proxy_id.decode()
+                tasks.append(self._check_single_proxy_health(proxy_id))
+
+            # 执行并发检查
+            health_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            for result in health_results:
+                if isinstance(result, Exception):
+                    self.logger.error(f"Health check error: {result}")
+                    continue
+
+                results['details'].append(result)
+                results['checked'] += 1
+
+                if result['healthy']:
+                    results['healthy'] += 1
+                    if result.get('recovered'):
+                        results['recovered'] += 1
+                else:
+                    results['unhealthy'] += 1
+                    if result.get('suspended'):
+                        results['suspended'] += 1
+
+            self.logger.info(f"Batch health check completed: {results['healthy']}/{results['checked']} healthy")
+            return results
+
+        except Exception as e:
+            self.logger.error(f"Batch health check failed: {e}")
+            return {'error': str(e)}
+
+    async def _check_single_proxy_health(self, proxy_id: str) -> Dict:
+        """单个代理健康检查"""
+        try:
+            config = await self._get_proxy_config(proxy_id)
+            metrics = await self._get_proxy_metrics(proxy_id)
+
+            if not config or not metrics:
+                return {
+                    'proxy_id': proxy_id,
+                    'healthy': False,
+                    'reason': 'Missing config or metrics'
+                }
+
+            # 执行连接测试
+            is_connected = await self._test_proxy_connection(config)
+            health_score = metrics.health_score
+
+            result = {
+                'proxy_id': proxy_id,
+                'healthy': is_connected and health_score >= self.health_threshold,
+                'connected': is_connected,
+                'health_score': health_score,
+                'status': config.status.value,
+                'response_time': metrics.average_response_time,
+                'success_rate': metrics.success_rate,
+                'consecutive_errors': metrics.consecutive_errors
+            }
+
+            # 检查是否需要暂停
+            if not result['healthy']:
+                if metrics.consecutive_errors >= config.max_consecutive_errors:
+                    result['should_suspend'] = True
+                    result['reason'] = f"Too many consecutive errors: {metrics.consecutive_errors}"
+                elif not is_connected:
+                    result['should_suspend'] = True
+                    result['reason'] = "Connection test failed"
+                elif metrics.success_rate < 0.3:
+                    result['should_suspend'] = True
+                    result['reason'] = f"Low success rate: {metrics.success_rate:.2%}"
+
+            # 检查是否可以恢复
+            elif config.status in [ProxyStatus.ERROR, ProxyStatus.INACTIVE]:
+                if is_connected and health_score >= 0.8:
+                    result['recovered'] = True
+                    await self._recover_proxy(proxy_id)
+
+            return result
+
+        except Exception as e:
+            return {
+                'proxy_id': proxy_id,
+                'healthy': False,
+                'error': str(e)
+            }
+
+    async def get_proxy_statistics(self) -> Dict:
+        """获取代理池统计信息"""
+        try:
+            stats = {
+                'total_proxies': 0,
+                'active_proxies': 0,
+                'inactive_proxies': 0,
+                'error_proxies': 0,
+                'banned_proxies': 0,
+                'region_distribution': {},
+                'provider_distribution': {},
+                'health_distribution': {'high': 0, 'medium': 0, 'low': 0},
+                'average_health_score': 0.0,
+                'average_response_time': 0.0,
+                'total_daily_usage': 0,
+                'total_concurrent_usage': 0
+            }
+
+            # 获取所有代理
+            all_proxies = await self.redis.smembers('proxies:all')
+            stats['total_proxies'] = len(all_proxies)
+
+            total_health = 0.0
+            total_response_time = 0.0
+            active_count = 0
+
+            for proxy_id in all_proxies:
+                proxy_id = proxy_id.decode()
+
+                config = await self._get_proxy_config(proxy_id)
+                metrics = await self._get_proxy_metrics(proxy_id)
+
+                if not config or not metrics:
+                    continue
+
+                # 状态统计
+                status_key = f"{config.status.value}_proxies"
+                if status_key in stats:
+                    stats[status_key] += 1
+
+                # 地区统计
+                region = config.region.value
+                stats['region_distribution'][region] = stats['region_distribution'].get(region, 0) + 1
+
+                # 提供商统计
+                provider = config.provider
+                stats['provider_distribution'][provider] = stats['provider_distribution'].get(provider, 0) + 1
+
+                # 健康分数统计
+                health_score = metrics.health_score
+                total_health += health_score
+
+                if health_score >= 0.8:
+                    stats['health_distribution']['high'] += 1
+                elif health_score >= 0.6:
+                    stats['health_distribution']['medium'] += 1
+                else:
+                    stats['health_distribution']['low'] += 1
+
+                # 响应时间统计
+                if metrics.average_response_time > 0:
+                    total_response_time += metrics.average_response_time
+                    active_count += 1
+
+                # 使用量统计
+                stats['total_daily_usage'] += metrics.daily_usage
+
+                # 并发使用统计
+                current_usage = await self._get_current_concurrent_usage(proxy_id)
+                stats['total_concurrent_usage'] += current_usage
+
+            # 计算平均值
+            if stats['total_proxies'] > 0:
+                stats['average_health_score'] = total_health / stats['total_proxies']
+
+            if active_count > 0:
+                stats['average_response_time'] = total_response_time / active_count
+
+            return stats
+
+        except Exception as e:
+            self.logger.error(f"Failed to get proxy statistics: {e}")
+            return {}
+
+    async def remove_proxy(self, proxy_id: str) -> bool:
+        """移除代理"""
+        try:
+            # 清理代理数据
+            await self._cleanup_proxy_data(proxy_id)
+
+            self.logger.info(f"Proxy {proxy_id} removed successfully")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to remove proxy {proxy_id}: {e}")
+            return False
+
+    # ========== 辅助方法 ==========
+
+    async def _save_proxy_config(self, config: ProxyConfig):
+        """保存代理配置"""
+        try:
+            config_dict = asdict(config)
+            config_dict['protocol'] = config.protocol.value
+            config_dict['region'] = config.region.value
+            config_dict['status'] = config.status.value
+            config_dict['tags'] = json.dumps(config.tags)
+
+            if config.expires_at:
+                config_dict['expires_at'] = config.expires_at.isoformat()
+
+            await self.redis.hset(f'proxy:{config.proxy_id}:config', mapping=config_dict)
+            await self.redis.sadd('proxies:all', config.proxy_id)
+
+            # 更新状态索引
+            await self._update_proxy_status_index(config.proxy_id, config.status)
+
+        except Exception as e:
+            self.logger.error(f"Failed to save proxy config: {e}")
+
+    async def _get_proxy_config(self, proxy_id: str) -> Optional[ProxyConfig]:
+        """获取代理配置"""
+        try:
+            config_data = await self.redis.hgetall(f'proxy:{proxy_id}:config')
+            if not config_data:
+                return None
+
+            # 转换字节数据
+            config_dict = {k.decode(): v.decode() for k, v in config_data.items()}
+
+            # 处理枚举类型
+            config_dict['protocol'] = ProxyProtocol(config_dict['protocol'])
+            config_dict['region'] = ProxyRegion(config_dict['region'])
+            config_dict['status'] = ProxyStatus(config_dict['status'])
+            config_dict['tags'] = json.loads(config_dict.get('tags', '[]'))
+
+            # 处理数值类型
+            for field in ['port', 'max_concurrent', 'daily_limit', 'max_consecutive_errors', 'timeout_seconds']:
+                if field in config_dict:
+                    config_dict[field] = int(config_dict[field])
+
+            config_dict['cost_per_gb'] = float(config_dict.get('cost_per_gb', 0.0))
+
+            # 处理日期时间
+            if 'expires_at' in config_dict and config_dict['expires_at']:
+                config_dict['expires_at'] = datetime.fromisoformat(config_dict['expires_at'])
+
+            return ProxyConfig(**config_dict)
+
+        except Exception as e:
+            self.logger.error(f"Failed to get proxy config for {proxy_id}: {e}")
+            return None
+
+    async def _initialize_proxy_metrics(self, proxy_id: str):
+        """初始化代理指标"""
+        metrics = ProxyMetrics()
+        await self._save_proxy_metrics(proxy_id, metrics)
+
+    async def _get_proxy_metrics(self, proxy_id: str) -> ProxyMetrics:
+        """获取代理指标"""
+        try:
+            metrics_data = await self.redis.hgetall(f'proxy:{proxy_id}:metrics')
+
+            if not metrics_data:
+                return ProxyMetrics()
+
+            # 转换数据类型
+            metrics_dict = {}
+            for k, v in metrics_data.items():
+                key = k.decode()
+                value = v.decode()
+
+                if key in ['total_requests', 'successful_requests', 'failed_requests',
+                          'timeout_requests', 'banned_requests', 'consecutive_errors',
+                          'daily_usage', 'weekly_usage']:
+                    metrics_dict[key] = int(value) if value else 0
+                elif key == 'average_response_time':
+                    metrics_dict[key] = float(value) if value else 0.0
+                elif key in ['last_used', 'last_success', 'last_error']:
+                    if value:
+                        metrics_dict[key] = datetime.fromisoformat(value)
+
+            return ProxyMetrics(**metrics_dict)
+
+        except Exception as e:
+            self.logger.error(f"Failed to get proxy metrics for {proxy_id}: {e}")
+            return ProxyMetrics()
+
+    async def _save_proxy_metrics(self, proxy_id: str, metrics: ProxyMetrics):
+        """保存代理指标"""
+        try:
+            metrics_dict = asdict(metrics)
+
+            # 转换datetime为字符串
+            for key, value in metrics_dict.items():
+                if isinstance(value, datetime):
+                    metrics_dict[key] = value.isoformat()
+                elif value is None:
+                    metrics_dict[key] = ''
+
+            await self.redis.hset(f'proxy:{proxy_id}:metrics', mapping=metrics_dict)
+
+        except Exception as e:
+            self.logger.error(f"Failed to save proxy metrics: {e}")
+
+    async def _update_proxy_status_index(self, proxy_id: str, status: ProxyStatus):
+        """更新代理状态索引"""
+        # 从所有状态集合中移除
+        for s in ProxyStatus:
+            await self.redis.srem(f'proxies:{s.value}', proxy_id)
+
+        # 添加到新状态集合
+        await self.redis.sadd(f'proxies:{status.value}', proxy_id)
+
+    async def _update_proxy_status(self, proxy_id: str, status: ProxyStatus):
+        """更新代理状态"""
+        await self.redis.hset(f'proxy:{proxy_id}:config', 'status', status.value)
+        await self._update_proxy_status_index(proxy_id, status)
+
+    async def _get_current_concurrent_usage(self, proxy_id: str) -> int:
+        """获取当前并发使用数"""
+        usage = await self.redis.get(f'proxy:{proxy_id}:concurrent')
+        return int(usage) if usage else 0
+
+    async def _is_proxy_over_limit(self, proxy_id: str) -> bool:
+        """检查代理是否超过使用限制"""
+        config = await self._get_proxy_config(proxy_id)
+        metrics = await self._get_proxy_metrics(proxy_id)
+
+        if not config or not metrics:
+            return True
+
+        return metrics.daily_usage >= config.daily_limit
+
+    async def _record_proxy_usage(self, proxy_id: str):
+        """记录代理使用"""
+        await self.redis.hincrby(f'proxy:{proxy_id}:metrics', 'daily_usage', 1)
+        await self.redis.hset(f'proxy:{proxy_id}:metrics', 'last_used', datetime.utcnow().isoformat())
+
+        # 增加并发计数
+        await self.redis.incr(f'proxy:{proxy_id}:concurrent')
+        await self.redis.expire(f'proxy:{proxy_id}:concurrent', 300)  # 5分钟过期
+
+    async def _update_response_time(self, proxy_id: str, response_time: float):
+        """更新响应时间"""
+        # 获取当前平均响应时间
+        current_avg = await self.redis.hget(f'proxy:{proxy_id}:metrics', 'average_response_time')
+        current_avg = float(current_avg) if current_avg else 0.0
+
+        # 计算新的平均响应时间（简单移动平均）
+        new_avg = (current_avg * 0.8) + (response_time * 0.2)
+
+        await self.redis.hset(f'proxy:{proxy_id}:metrics', 'average_response_time', str(new_avg))
+
+    async def _suspend_proxy(self, proxy_id: str, reason: str):
+        """暂停代理"""
+        await self._update_proxy_status(proxy_id, ProxyStatus.ERROR)
+
+        # 记录暂停原因
+        await self.redis.hset(f'proxy:{proxy_id}:suspension',
+                            'reason', reason,
+                            'suspended_at', datetime.utcnow().isoformat())
+
+        self.logger.warning(f"Proxy {proxy_id} suspended: {reason}")
+
+    async def _recover_proxy(self, proxy_id: str):
+        """恢复代理"""
+        await self._update_proxy_status(proxy_id, ProxyStatus.ACTIVE)
+
+        # 清理暂停记录
+        await self.redis.delete(f'proxy:{proxy_id}:suspension')
+
+        self.logger.info(f"Proxy {proxy_id} recovered")
+
+    async def _cleanup_proxy_data(self, proxy_id: str):
+        """清理代理数据"""
+        # 删除所有相关的Redis键
+        keys_to_delete = [
+            f'proxy:{proxy_id}:config',
+            f'proxy:{proxy_id}:metrics',
+            f'proxy:{proxy_id}:suspension',
+            f'proxy:{proxy_id}:concurrent'
+        ]
+
+        for key in keys_to_delete:
+            await self.redis.delete(key)
+
+        # 从所有集合中移除
+        await self.redis.srem('proxies:all', proxy_id)
+        for status in ProxyStatus:
+            await self.redis.srem(f'proxies:{status.value}', proxy_id)
 
 ### 4. 数据存储模块
 
