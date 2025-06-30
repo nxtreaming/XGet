@@ -1,4 +1,4 @@
-# XGet 平衡实施方案 - 生产就绪版本
+# XGet 实施方案
 
 ## 项目概述
 
@@ -1013,6 +1013,1292 @@ CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 - **服务器**: 中等配置即可满足初期需求
 - **代理IP**: 根据采集量按需购买
 - **监控**: 使用开源方案，成本可控
+
+## Web展示页面设计
+
+### 管理后台界面
+
+基于FastAPI + Vue.js构建的现代化Web管理界面，提供完整的系统管理功能。
+
+#### 🎯 **核心页面模块**
+
+```text
+┌─────────────────────────────────────────────────────────────────────┐
+│                        XGet Web管理界面                            │
+├─────────────────┬─────────────────┬─────────────────┬───────────────┤
+│   📊 数据查询    │   🔧 系统管理    │   📈 统计分析    │   ⚙️ 系统设置   │
+│   推文搜索      │   账号管理      │   采集统计      │   配置管理     │
+│   用户查询      │   代理管理      │   性能监控      │   权限管理     │
+│   数据导出      │   任务管理      │   错误分析      │   系统日志     │
+└─────────────────┴─────────────────┴─────────────────┴───────────────┘
+```
+
+#### 📊 **数据查询页面**
+
+**推文搜索界面**
+```html
+<!-- 推文搜索页面 -->
+<template>
+  <div class="tweet-search-page">
+    <!-- 搜索表单 -->
+    <el-card class="search-form">
+      <el-form :model="searchForm" label-width="120px">
+        <el-row :gutter="20">
+          <el-col :span="8">
+            <el-form-item label="关键词">
+              <el-input v-model="searchForm.keyword" placeholder="输入搜索关键词" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="时间范围">
+              <el-date-picker
+                v-model="searchForm.dateRange"
+                type="datetimerange"
+                range-separator="至"
+                start-placeholder="开始时间"
+                end-placeholder="结束时间"
+              />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="用户名">
+              <el-input v-model="searchForm.username" placeholder="指定用户名" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row>
+          <el-col :span="24">
+            <el-button type="primary" @click="searchTweets">搜索</el-button>
+            <el-button @click="resetForm">重置</el-button>
+            <el-button type="success" @click="exportData">导出数据</el-button>
+          </el-col>
+        </el-row>
+      </el-form>
+    </el-card>
+
+    <!-- 搜索结果 -->
+    <el-card class="search-results">
+      <el-table :data="tweets" v-loading="loading">
+        <el-table-column prop="text" label="推文内容" width="400" show-overflow-tooltip />
+        <el-table-column prop="username" label="用户" width="120" />
+        <el-table-column prop="created_at" label="发布时间" width="180" />
+        <el-table-column prop="like_count" label="点赞" width="80" />
+        <el-table-column prop="retweet_count" label="转发" width="80" />
+        <el-table-column label="操作" width="120">
+          <template #default="scope">
+            <el-button size="small" @click="viewDetail(scope.row)">详情</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+
+      <el-pagination
+        v-model:current-page="pagination.page"
+        v-model:page-size="pagination.size"
+        :total="pagination.total"
+        layout="total, sizes, prev, pager, next, jumper"
+        @size-change="handleSizeChange"
+        @current-change="handleCurrentChange"
+      />
+    </el-card>
+  </div>
+</template>
+```
+
+#### 🔧 **系统管理页面**
+
+**账号管理界面**
+```html
+<!-- 账号管理页面 -->
+<template>
+  <div class="account-management">
+    <el-card>
+      <template #header>
+        <div class="card-header">
+          <span>X.com账号管理</span>
+          <el-button type="primary" @click="addAccount">添加账号</el-button>
+        </div>
+      </template>
+
+      <!-- 账号状态统计 -->
+      <el-row :gutter="20" class="stats-row">
+        <el-col :span="6">
+          <el-statistic title="总账号数" :value="accountStats.total" />
+        </el-col>
+        <el-col :span="6">
+          <el-statistic title="健康账号" :value="accountStats.healthy" />
+        </el-col>
+        <el-col :span="6">
+          <el-statistic title="暂停账号" :value="accountStats.suspended" />
+        </el-col>
+        <el-col :span="6">
+          <el-statistic title="错误账号" :value="accountStats.error" />
+        </el-col>
+      </el-row>
+
+      <!-- 账号列表 -->
+      <el-table :data="accounts" v-loading="loading">
+        <el-table-column prop="username" label="用户名" width="150" />
+        <el-table-column prop="status" label="状态" width="100">
+          <template #default="scope">
+            <el-tag :type="getStatusType(scope.row.status)">
+              {{ getStatusText(scope.row.status) }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="last_used" label="最后使用" width="180" />
+        <el-table-column prop="success_count" label="成功次数" width="100" />
+        <el-table-column prop="error_count" label="错误次数" width="100" />
+        <el-table-column prop="health_score" label="健康分数" width="100">
+          <template #default="scope">
+            <el-progress :percentage="scope.row.health_score" :color="getHealthColor(scope.row.health_score)" />
+          </template>
+        </el-table-column>
+        <el-table-column label="操作" width="200">
+          <template #default="scope">
+            <el-button size="small" @click="testAccount(scope.row)">测试</el-button>
+            <el-button size="small" @click="refreshCookies(scope.row)">刷新</el-button>
+            <el-button size="small" type="danger" @click="deleteAccount(scope.row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+  </div>
+</template>
+```
+
+**代理IP管理界面**
+```html
+<!-- 代理管理页面 -->
+<template>
+  <div class="proxy-management">
+    <el-card>
+      <template #header>
+        <div class="card-header">
+          <span>代理IP池管理</span>
+          <el-button type="primary" @click="addProxy">添加代理</el-button>
+        </div>
+      </template>
+
+      <!-- 代理状态统计 -->
+      <el-row :gutter="20" class="stats-row">
+        <el-col :span="6">
+          <el-statistic title="总代理数" :value="proxyStats.total" />
+        </el-col>
+        <el-col :span="6">
+          <el-statistic title="可用代理" :value="proxyStats.available" />
+        </el-col>
+        <el-col :span="6">
+          <el-statistic title="平均延迟" :value="proxyStats.avgLatency" suffix="ms" />
+        </el-col>
+        <el-col :span="6">
+          <el-statistic title="成功率" :value="proxyStats.successRate" suffix="%" />
+        </el-col>
+      </el-row>
+
+      <!-- 代理列表 -->
+      <el-table :data="proxies" v-loading="loading">
+        <el-table-column prop="host" label="主机" width="150" />
+        <el-table-column prop="port" label="端口" width="80" />
+        <el-table-column prop="type" label="类型" width="100" />
+        <el-table-column prop="location" label="位置" width="120" />
+        <el-table-column prop="status" label="状态" width="100">
+          <template #default="scope">
+            <el-tag :type="getProxyStatusType(scope.row.status)">
+              {{ scope.row.status }}
+            </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="latency" label="延迟" width="80" />
+        <el-table-column prop="success_rate" label="成功率" width="100" />
+        <el-table-column label="操作" width="200">
+          <template #default="scope">
+            <el-button size="small" @click="testProxy(scope.row)">测试</el-button>
+            <el-button size="small" type="warning" @click="toggleProxy(scope.row)">
+              {{ scope.row.status === 'active' ? '禁用' : '启用' }}
+            </el-button>
+            <el-button size="small" type="danger" @click="deleteProxy(scope.row)">删除</el-button>
+          </template>
+        </el-table-column>
+      </el-table>
+    </el-card>
+  </div>
+</template>
+```
+
+#### 📈 **统计分析页面**
+
+**数据采集统计**
+```html
+<!-- 统计分析页面 -->
+<template>
+  <div class="analytics-dashboard">
+    <!-- 关键指标卡片 -->
+    <el-row :gutter="20" class="metrics-row">
+      <el-col :span="6">
+        <el-card class="metric-card">
+          <el-statistic title="今日采集" :value="todayStats.collected" />
+          <div class="metric-trend">
+            <span :class="todayStats.trend > 0 ? 'trend-up' : 'trend-down'">
+              {{ todayStats.trend > 0 ? '↗' : '↘' }} {{ Math.abs(todayStats.trend) }}%
+            </span>
+          </div>
+        </el-card>
+      </el-col>
+      <el-col :span="6">
+        <el-card class="metric-card">
+          <el-statistic title="成功率" :value="todayStats.successRate" suffix="%" />
+        </el-card>
+      </el-col>
+      <el-col :span="6">
+        <el-card class="metric-card">
+          <el-statistic title="活跃任务" :value="todayStats.activeTasks" />
+        </el-card>
+      </el-col>
+      <el-col :span="6">
+        <el-card class="metric-card">
+          <el-statistic title="数据总量" :value="todayStats.totalData" />
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <!-- 图表区域 -->
+    <el-row :gutter="20">
+      <el-col :span="12">
+        <el-card title="采集趋势">
+          <div ref="collectionChart" style="height: 300px;"></div>
+        </el-card>
+      </el-col>
+      <el-col :span="12">
+        <el-card title="账号使用分布">
+          <div ref="accountChart" style="height: 300px;"></div>
+        </el-card>
+      </el-col>
+    </el-row>
+
+    <el-row :gutter="20">
+      <el-col :span="24">
+        <el-card title="实时任务监控">
+          <el-table :data="realtimeTasks" v-loading="loading">
+            <el-table-column prop="task_id" label="任务ID" width="200" />
+            <el-table-column prop="type" label="类型" width="100" />
+            <el-table-column prop="keyword" label="关键词" width="150" />
+            <el-table-column prop="status" label="状态" width="100">
+              <template #default="scope">
+                <el-tag :type="getTaskStatusType(scope.row.status)">
+                  {{ scope.row.status }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="progress" label="进度" width="150">
+              <template #default="scope">
+                <el-progress :percentage="scope.row.progress" />
+              </template>
+            </el-table-column>
+            <el-table-column prop="created_at" label="创建时间" width="180" />
+            <el-table-column label="操作" width="120">
+              <template #default="scope">
+                <el-button size="small" @click="viewTaskDetail(scope.row)">详情</el-button>
+                <el-button size="small" type="danger" @click="cancelTask(scope.row)">取消</el-button>
+              </template>
+            </el-table-column>
+          </el-table>
+        </el-card>
+      </el-col>
+    </el-row>
+  </div>
+</template>
+```
+
+## 数据库结构设计
+
+### MongoDB集合设计
+
+基于文档型数据库的特点，设计灵活且高效的数据结构。
+
+#### 📊 **核心数据集合**
+
+```javascript
+// 推文集合 (tweets)
+{
+  "_id": ObjectId("..."),
+  "tweet_id": "1234567890123456789",  // Twitter推文ID
+  "text": "推文内容...",
+  "user": {
+    "user_id": "987654321",
+    "username": "example_user",
+    "display_name": "示例用户",
+    "verified": false,
+    "followers_count": 1000
+  },
+  "metrics": {
+    "like_count": 100,
+    "retweet_count": 50,
+    "reply_count": 25,
+    "quote_count": 10,
+    "view_count": 5000
+  },
+  "content": {
+    "hashtags": ["#python", "#ai"],
+    "mentions": ["@user1", "@user2"],
+    "urls": [
+      {
+        "url": "https://t.co/abc123",
+        "expanded_url": "https://example.com/article",
+        "display_url": "example.com/article"
+      }
+    ],
+    "media": [
+      {
+        "type": "photo",
+        "url": "https://pbs.twimg.com/media/...",
+        "width": 1200,
+        "height": 800
+      }
+    ]
+  },
+  "metadata": {
+    "created_at": ISODate("2024-01-01T12:00:00Z"),
+    "collected_at": ISODate("2024-01-01T12:05:00Z"),
+    "source_account": "account_001",
+    "source_proxy": "proxy_001",
+    "collection_method": "search",
+    "search_keyword": "python programming"
+  },
+  "processing": {
+    "sentiment_score": 0.8,
+    "language": "zh",
+    "topics": ["technology", "programming"],
+    "processed_at": ISODate("2024-01-01T12:06:00Z")
+  }
+}
+
+// 用户集合 (users)
+{
+  "_id": ObjectId("..."),
+  "user_id": "987654321",
+  "username": "example_user",
+  "display_name": "示例用户",
+  "description": "用户简介...",
+  "profile": {
+    "verified": false,
+    "protected": false,
+    "location": "北京",
+    "website": "https://example.com",
+    "profile_image_url": "https://pbs.twimg.com/profile_images/...",
+    "profile_banner_url": "https://pbs.twimg.com/profile_banners/..."
+  },
+  "metrics": {
+    "followers_count": 1000,
+    "following_count": 500,
+    "tweet_count": 2000,
+    "listed_count": 10
+  },
+  "metadata": {
+    "created_at": ISODate("2020-01-01T00:00:00Z"),
+    "collected_at": ISODate("2024-01-01T12:00:00Z"),
+    "last_updated": ISODate("2024-01-01T12:00:00Z")
+  },
+  "analysis": {
+    "activity_score": 0.7,
+    "influence_score": 0.5,
+    "topics": ["technology", "ai"],
+    "sentiment_trend": "positive"
+  }
+}
+
+// 采集任务集合 (collection_tasks)
+{
+  "_id": ObjectId("..."),
+  "task_id": "task_20240101_001",
+  "type": "search",  // search, user_timeline, user_profile
+  "parameters": {
+    "keyword": "python programming",
+    "count": 1000,
+    "date_range": {
+      "start": ISODate("2024-01-01T00:00:00Z"),
+      "end": ISODate("2024-01-01T23:59:59Z")
+    }
+  },
+  "status": "completed",  // pending, running, completed, failed, cancelled
+  "progress": {
+    "total": 1000,
+    "collected": 856,
+    "failed": 12,
+    "percentage": 85.6
+  },
+  "resources": {
+    "assigned_accounts": ["account_001", "account_002"],
+    "used_proxies": ["proxy_001", "proxy_002"],
+    "worker_id": "worker_001"
+  },
+  "timing": {
+    "created_at": ISODate("2024-01-01T10:00:00Z"),
+    "started_at": ISODate("2024-01-01T10:01:00Z"),
+    "completed_at": ISODate("2024-01-01T12:00:00Z"),
+    "duration_seconds": 7140
+  },
+  "results": {
+    "tweets_collected": 856,
+    "users_discovered": 234,
+    "errors": [
+      {
+        "type": "rate_limit",
+        "count": 5,
+        "last_occurrence": ISODate("2024-01-01T11:30:00Z")
+      }
+    ]
+  }
+}
+
+// 账号管理集合 (accounts)
+{
+  "_id": ObjectId("..."),
+  "account_id": "account_001",
+  "username": "scraper_account_1",
+  "email": "account1@example.com",
+  "status": "active",  // active, suspended, error, maintenance
+  "health": {
+    "score": 0.85,
+    "last_check": ISODate("2024-01-01T12:00:00Z"),
+    "consecutive_errors": 0,
+    "total_requests": 10000,
+    "successful_requests": 9500,
+    "success_rate": 0.95
+  },
+  "usage": {
+    "daily_limit": 1000,
+    "daily_used": 234,
+    "last_used": ISODate("2024-01-01T11:45:00Z"),
+    "cooldown_until": null
+  },
+  "authentication": {
+    "cookies_updated": ISODate("2024-01-01T08:00:00Z"),
+    "cookies_expires": ISODate("2024-01-08T08:00:00Z"),
+    "login_method": "playwright_auto"
+  },
+  "metadata": {
+    "created_at": ISODate("2024-01-01T00:00:00Z"),
+    "last_maintenance": ISODate("2024-01-01T08:00:00Z"),
+    "notes": "主要用于技术类推文采集"
+  }
+}
+
+// 代理管理集合 (proxies)
+{
+  "_id": ObjectId("..."),
+  "proxy_id": "proxy_001",
+  "config": {
+    "host": "proxy.example.com",
+    "port": 8080,
+    "protocol": "http",  // http, https, socks5
+    "username": "proxy_user",
+    "password": "proxy_pass",
+    "location": "US-East"
+  },
+  "status": "active",  // active, inactive, error
+  "performance": {
+    "latency_ms": 150,
+    "success_rate": 0.92,
+    "total_requests": 5000,
+    "failed_requests": 400,
+    "last_test": ISODate("2024-01-01T12:00:00Z")
+  },
+  "usage": {
+    "concurrent_limit": 10,
+    "current_usage": 3,
+    "daily_limit": 10000,
+    "daily_used": 2340
+  },
+  "metadata": {
+    "provider": "ProxyProvider Inc",
+    "cost_per_gb": 0.1,
+    "created_at": ISODate("2024-01-01T00:00:00Z"),
+    "expires_at": ISODate("2024-02-01T00:00:00Z")
+  }
+}
+```
+
+#### 🔍 **索引设计**
+
+```javascript
+// 推文集合索引
+db.tweets.createIndex({ "tweet_id": 1 }, { unique: true })
+db.tweets.createIndex({ "metadata.created_at": -1 })
+db.tweets.createIndex({ "metadata.search_keyword": 1 })
+db.tweets.createIndex({ "user.username": 1 })
+db.tweets.createIndex({ "content.hashtags": 1 })
+db.tweets.createIndex({ "metadata.collected_at": -1 })
+
+// 复合索引用于复杂查询
+db.tweets.createIndex({
+  "metadata.search_keyword": 1,
+  "metadata.created_at": -1
+})
+db.tweets.createIndex({
+  "user.username": 1,
+  "metadata.created_at": -1
+})
+
+// 用户集合索引
+db.users.createIndex({ "user_id": 1 }, { unique: true })
+db.users.createIndex({ "username": 1 }, { unique: true })
+db.users.createIndex({ "metrics.followers_count": -1 })
+db.users.createIndex({ "metadata.collected_at": -1 })
+
+// 任务集合索引
+db.collection_tasks.createIndex({ "task_id": 1 }, { unique: true })
+db.collection_tasks.createIndex({ "status": 1 })
+db.collection_tasks.createIndex({ "timing.created_at": -1 })
+db.collection_tasks.createIndex({ "type": 1, "status": 1 })
+
+// 账号集合索引
+db.accounts.createIndex({ "account_id": 1 }, { unique: true })
+db.accounts.createIndex({ "username": 1 }, { unique: true })
+db.accounts.createIndex({ "status": 1 })
+db.accounts.createIndex({ "health.score": -1 })
+
+// 代理集合索引
+db.proxies.createIndex({ "proxy_id": 1 }, { unique: true })
+db.proxies.createIndex({ "status": 1 })
+db.proxies.createIndex({ "performance.success_rate": -1 })
+```
+
+## API服务设计
+
+### RESTful API接口
+
+基于FastAPI构建的高性能API服务，提供完整的数据访问和管理功能。
+
+#### 🚀 **API架构设计**
+
+```python
+# api/main.py - FastAPI主应用
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+import asyncio
+from datetime import datetime, timedelta
+
+app = FastAPI(
+    title="XGet API",
+    description="X(Twitter)数据采集系统API",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# CORS配置
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 生产环境应限制具体域名
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# 安全认证
+security = HTTPBearer()
+
+async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    """验证API访问令牌"""
+    # 这里实现具体的token验证逻辑
+    if not credentials.token or credentials.token != "your-api-token":
+        raise HTTPException(status_code=401, detail="Invalid authentication token")
+    return credentials.token
+```
+
+#### 📊 **数据查询API**
+
+```python
+# api/routes/data.py - 数据查询接口
+from fastapi import APIRouter, Query, Depends
+from typing import List, Optional
+from datetime import datetime
+from ..models import TweetResponse, UserResponse, SearchRequest
+from ..services import DataService
+
+router = APIRouter(prefix="/api/v1/data", tags=["数据查询"])
+
+@router.get("/tweets/search", response_model=List[TweetResponse])
+async def search_tweets(
+    keyword: str = Query(..., description="搜索关键词"),
+    limit: int = Query(100, ge=1, le=1000, description="返回数量限制"),
+    start_date: Optional[datetime] = Query(None, description="开始时间"),
+    end_date: Optional[datetime] = Query(None, description="结束时间"),
+    username: Optional[str] = Query(None, description="指定用户名"),
+    min_likes: Optional[int] = Query(None, description="最小点赞数"),
+    has_media: Optional[bool] = Query(None, description="是否包含媒体"),
+    token: str = Depends(verify_token)
+):
+    """
+    搜索推文数据
+
+    支持多种过滤条件：
+    - 关键词搜索
+    - 时间范围过滤
+    - 用户过滤
+    - 互动数过滤
+    - 媒体类型过滤
+    """
+    try:
+        data_service = DataService()
+        tweets = await data_service.search_tweets(
+            keyword=keyword,
+            limit=limit,
+            start_date=start_date,
+            end_date=end_date,
+            username=username,
+            min_likes=min_likes,
+            has_media=has_media
+        )
+        return tweets
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"搜索失败: {str(e)}")
+
+@router.get("/tweets/{tweet_id}", response_model=TweetResponse)
+async def get_tweet_by_id(
+    tweet_id: str,
+    token: str = Depends(verify_token)
+):
+    """根据推文ID获取详细信息"""
+    try:
+        data_service = DataService()
+        tweet = await data_service.get_tweet_by_id(tweet_id)
+        if not tweet:
+            raise HTTPException(status_code=404, detail="推文不存在")
+        return tweet
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取推文失败: {str(e)}")
+
+@router.get("/users/{username}", response_model=UserResponse)
+async def get_user_profile(
+    username: str,
+    token: str = Depends(verify_token)
+):
+    """获取用户资料"""
+    try:
+        data_service = DataService()
+        user = await data_service.get_user_by_username(username)
+        if not user:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        return user
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取用户失败: {str(e)}")
+
+@router.get("/users/{username}/tweets", response_model=List[TweetResponse])
+async def get_user_tweets(
+    username: str,
+    limit: int = Query(100, ge=1, le=1000),
+    start_date: Optional[datetime] = Query(None),
+    end_date: Optional[datetime] = Query(None),
+    token: str = Depends(verify_token)
+):
+    """获取用户的推文列表"""
+    try:
+        data_service = DataService()
+        tweets = await data_service.get_user_tweets(
+            username=username,
+            limit=limit,
+            start_date=start_date,
+            end_date=end_date
+        )
+        return tweets
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取用户推文失败: {str(e)}")
+
+@router.get("/analytics/trending", response_model=Dict[str, Any])
+async def get_trending_topics(
+    hours: int = Query(24, ge=1, le=168, description="时间范围(小时)"),
+    limit: int = Query(20, ge=1, le=100, description="返回数量"),
+    token: str = Depends(verify_token)
+):
+    """获取热门话题和趋势"""
+    try:
+        data_service = DataService()
+        trending = await data_service.get_trending_topics(hours=hours, limit=limit)
+        return trending
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取趋势失败: {str(e)}")
+```
+
+#### 🔧 **任务管理API**
+
+```python
+# api/routes/tasks.py - 任务管理接口
+from fastapi import APIRouter, BackgroundTasks, Depends
+from typing import List, Optional
+from ..models import TaskRequest, TaskResponse, TaskStatus
+from ..services import TaskService
+
+router = APIRouter(prefix="/api/v1/tasks", tags=["任务管理"])
+
+@router.post("/search", response_model=TaskResponse)
+async def create_search_task(
+    request: TaskRequest,
+    background_tasks: BackgroundTasks,
+    token: str = Depends(verify_token)
+):
+    """
+    创建搜索任务
+
+    支持的任务类型：
+    - keyword_search: 关键词搜索
+    - user_timeline: 用户时间线
+    - user_profile: 用户资料采集
+    """
+    try:
+        task_service = TaskService()
+        task = await task_service.create_search_task(request)
+
+        # 异步执行任务
+        background_tasks.add_task(task_service.execute_task, task.task_id)
+
+        return task
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"创建任务失败: {str(e)}")
+
+@router.get("/", response_model=List[TaskResponse])
+async def list_tasks(
+    status: Optional[TaskStatus] = Query(None, description="任务状态过滤"),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+    token: str = Depends(verify_token)
+):
+    """获取任务列表"""
+    try:
+        task_service = TaskService()
+        tasks = await task_service.list_tasks(
+            status=status,
+            limit=limit,
+            offset=offset
+        )
+        return tasks
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取任务列表失败: {str(e)}")
+
+@router.get("/{task_id}", response_model=TaskResponse)
+async def get_task_detail(
+    task_id: str,
+    token: str = Depends(verify_token)
+):
+    """获取任务详情"""
+    try:
+        task_service = TaskService()
+        task = await task_service.get_task_by_id(task_id)
+        if not task:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return task
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取任务详情失败: {str(e)}")
+
+@router.post("/{task_id}/cancel")
+async def cancel_task(
+    task_id: str,
+    token: str = Depends(verify_token)
+):
+    """取消任务"""
+    try:
+        task_service = TaskService()
+        result = await task_service.cancel_task(task_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="任务不存在或无法取消")
+        return {"message": "任务已取消", "task_id": task_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"取消任务失败: {str(e)}")
+
+@router.get("/{task_id}/progress")
+async def get_task_progress(
+    task_id: str,
+    token: str = Depends(verify_token)
+):
+    """获取任务进度"""
+    try:
+        task_service = TaskService()
+        progress = await task_service.get_task_progress(task_id)
+        if not progress:
+            raise HTTPException(status_code=404, detail="任务不存在")
+        return progress
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取任务进度失败: {str(e)}")
+```
+
+#### ⚙️ **系统管理API**
+
+```python
+# api/routes/admin.py - 系统管理接口
+from fastapi import APIRouter, Depends, HTTPException
+from typing import List, Dict, Any
+from ..models import AccountResponse, ProxyResponse, SystemStats
+from ..services import AdminService
+
+router = APIRouter(prefix="/api/v1/admin", tags=["系统管理"])
+
+@router.get("/accounts", response_model=List[AccountResponse])
+async def list_accounts(
+    status: Optional[str] = Query(None, description="账号状态过滤"),
+    token: str = Depends(verify_token)
+):
+    """获取账号列表"""
+    try:
+        admin_service = AdminService()
+        accounts = await admin_service.list_accounts(status=status)
+        return accounts
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取账号列表失败: {str(e)}")
+
+@router.post("/accounts/{account_id}/test")
+async def test_account(
+    account_id: str,
+    token: str = Depends(verify_token)
+):
+    """测试账号可用性"""
+    try:
+        admin_service = AdminService()
+        result = await admin_service.test_account(account_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"测试账号失败: {str(e)}")
+
+@router.post("/accounts/{account_id}/refresh")
+async def refresh_account_cookies(
+    account_id: str,
+    token: str = Depends(verify_token)
+):
+    """刷新账号cookies"""
+    try:
+        admin_service = AdminService()
+        result = await admin_service.refresh_account_cookies(account_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"刷新cookies失败: {str(e)}")
+
+@router.get("/proxies", response_model=List[ProxyResponse])
+async def list_proxies(
+    status: Optional[str] = Query(None, description="代理状态过滤"),
+    token: str = Depends(verify_token)
+):
+    """获取代理列表"""
+    try:
+        admin_service = AdminService()
+        proxies = await admin_service.list_proxies(status=status)
+        return proxies
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取代理列表失败: {str(e)}")
+
+@router.post("/proxies/{proxy_id}/test")
+async def test_proxy(
+    proxy_id: str,
+    token: str = Depends(verify_token)
+):
+    """测试代理可用性"""
+    try:
+        admin_service = AdminService()
+        result = await admin_service.test_proxy(proxy_id)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"测试代理失败: {str(e)}")
+
+@router.get("/stats", response_model=SystemStats)
+async def get_system_stats(
+    token: str = Depends(verify_token)
+):
+    """获取系统统计信息"""
+    try:
+        admin_service = AdminService()
+        stats = await admin_service.get_system_stats()
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"获取系统统计失败: {str(e)}")
+
+@router.get("/health")
+async def health_check():
+    """系统健康检查（无需认证）"""
+    try:
+        admin_service = AdminService()
+        health = await admin_service.health_check()
+        return health
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"系统不健康: {str(e)}")
+```
+
+#### 📋 **数据模型定义**
+
+```python
+# api/models.py - API数据模型
+from pydantic import BaseModel, Field
+from typing import List, Optional, Dict, Any
+from datetime import datetime
+from enum import Enum
+
+class TaskStatus(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+class TaskType(str, Enum):
+    KEYWORD_SEARCH = "keyword_search"
+    USER_TIMELINE = "user_timeline"
+    USER_PROFILE = "user_profile"
+
+class MediaItem(BaseModel):
+    type: str = Field(..., description="媒体类型")
+    url: str = Field(..., description="媒体URL")
+    width: Optional[int] = Field(None, description="宽度")
+    height: Optional[int] = Field(None, description="高度")
+
+class UserInfo(BaseModel):
+    user_id: str = Field(..., description="用户ID")
+    username: str = Field(..., description="用户名")
+    display_name: str = Field(..., description="显示名称")
+    verified: bool = Field(False, description="是否认证")
+    followers_count: int = Field(0, description="粉丝数")
+
+class TweetResponse(BaseModel):
+    tweet_id: str = Field(..., description="推文ID")
+    text: str = Field(..., description="推文内容")
+    user: UserInfo = Field(..., description="用户信息")
+    like_count: int = Field(0, description="点赞数")
+    retweet_count: int = Field(0, description="转发数")
+    reply_count: int = Field(0, description="回复数")
+    quote_count: int = Field(0, description="引用数")
+    view_count: int = Field(0, description="查看数")
+    hashtags: List[str] = Field(default_factory=list, description="话题标签")
+    mentions: List[str] = Field(default_factory=list, description="提及用户")
+    urls: List[str] = Field(default_factory=list, description="链接")
+    media: List[MediaItem] = Field(default_factory=list, description="媒体内容")
+    created_at: datetime = Field(..., description="创建时间")
+    collected_at: datetime = Field(..., description="采集时间")
+
+class UserResponse(BaseModel):
+    user_id: str = Field(..., description="用户ID")
+    username: str = Field(..., description="用户名")
+    display_name: str = Field(..., description="显示名称")
+    description: Optional[str] = Field(None, description="用户简介")
+    verified: bool = Field(False, description="是否认证")
+    protected: bool = Field(False, description="是否受保护")
+    followers_count: int = Field(0, description="粉丝数")
+    following_count: int = Field(0, description="关注数")
+    tweet_count: int = Field(0, description="推文数")
+    location: Optional[str] = Field(None, description="位置")
+    website: Optional[str] = Field(None, description="网站")
+    profile_image_url: Optional[str] = Field(None, description="头像URL")
+    created_at: Optional[datetime] = Field(None, description="账号创建时间")
+    collected_at: datetime = Field(..., description="采集时间")
+
+class TaskRequest(BaseModel):
+    type: TaskType = Field(..., description="任务类型")
+    keyword: Optional[str] = Field(None, description="搜索关键词")
+    username: Optional[str] = Field(None, description="用户名")
+    count: int = Field(100, ge=1, le=10000, description="采集数量")
+    priority: str = Field("normal", description="任务优先级")
+    start_date: Optional[datetime] = Field(None, description="开始时间")
+    end_date: Optional[datetime] = Field(None, description="结束时间")
+
+class TaskProgress(BaseModel):
+    total: int = Field(..., description="总数")
+    collected: int = Field(..., description="已采集")
+    failed: int = Field(..., description="失败数")
+    percentage: float = Field(..., description="完成百分比")
+
+class TaskResponse(BaseModel):
+    task_id: str = Field(..., description="任务ID")
+    type: TaskType = Field(..., description="任务类型")
+    status: TaskStatus = Field(..., description="任务状态")
+    parameters: Dict[str, Any] = Field(..., description="任务参数")
+    progress: Optional[TaskProgress] = Field(None, description="任务进度")
+    created_at: datetime = Field(..., description="创建时间")
+    started_at: Optional[datetime] = Field(None, description="开始时间")
+    completed_at: Optional[datetime] = Field(None, description="完成时间")
+    error_message: Optional[str] = Field(None, description="错误信息")
+
+class AccountResponse(BaseModel):
+    account_id: str = Field(..., description="账号ID")
+    username: str = Field(..., description="用户名")
+    status: str = Field(..., description="账号状态")
+    health_score: float = Field(..., description="健康分数")
+    success_rate: float = Field(..., description="成功率")
+    daily_used: int = Field(..., description="今日使用次数")
+    daily_limit: int = Field(..., description="每日限制")
+    last_used: Optional[datetime] = Field(None, description="最后使用时间")
+
+class ProxyResponse(BaseModel):
+    proxy_id: str = Field(..., description="代理ID")
+    host: str = Field(..., description="主机地址")
+    port: int = Field(..., description="端口")
+    type: str = Field(..., description="代理类型")
+    location: str = Field(..., description="位置")
+    status: str = Field(..., description="状态")
+    latency_ms: int = Field(..., description="延迟(毫秒)")
+    success_rate: float = Field(..., description="成功率")
+
+class SystemStats(BaseModel):
+    total_tweets: int = Field(..., description="总推文数")
+    total_users: int = Field(..., description="总用户数")
+    active_tasks: int = Field(..., description="活跃任务数")
+    healthy_accounts: int = Field(..., description="健康账号数")
+    available_proxies: int = Field(..., description="可用代理数")
+    today_collected: int = Field(..., description="今日采集数")
+    system_uptime: str = Field(..., description="系统运行时间")
+    last_updated: datetime = Field(..., description="最后更新时间")
+```
+
+#### 🔧 **服务层实现**
+
+```python
+# api/services/data_service.py - 数据服务
+from motor.motor_asyncio import AsyncIOMotorClient
+from typing import List, Optional, Dict, Any
+from datetime import datetime, timedelta
+import logging
+from ..models import TweetResponse, UserResponse
+
+class DataService:
+    """数据查询服务"""
+
+    def __init__(self):
+        self.client = AsyncIOMotorClient(MONGODB_URI)
+        self.db = self.client.xget
+        self.logger = logging.getLogger(__name__)
+
+    async def search_tweets(
+        self,
+        keyword: str,
+        limit: int = 100,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+        username: Optional[str] = None,
+        min_likes: Optional[int] = None,
+        has_media: Optional[bool] = None
+    ) -> List[TweetResponse]:
+        """搜索推文"""
+        try:
+            # 构建查询条件
+            query = {}
+
+            # 关键词搜索
+            if keyword:
+                query["$or"] = [
+                    {"text": {"$regex": keyword, "$options": "i"}},
+                    {"content.hashtags": {"$regex": keyword, "$options": "i"}}
+                ]
+
+            # 时间范围
+            if start_date or end_date:
+                date_query = {}
+                if start_date:
+                    date_query["$gte"] = start_date
+                if end_date:
+                    date_query["$lte"] = end_date
+                query["metadata.created_at"] = date_query
+
+            # 用户过滤
+            if username:
+                query["user.username"] = username
+
+            # 互动数过滤
+            if min_likes:
+                query["metrics.like_count"] = {"$gte": min_likes}
+
+            # 媒体过滤
+            if has_media is not None:
+                if has_media:
+                    query["content.media"] = {"$exists": True, "$ne": []}
+                else:
+                    query["$or"] = [
+                        {"content.media": {"$exists": False}},
+                        {"content.media": []}
+                    ]
+
+            # 执行查询
+            cursor = self.db.tweets.find(query).sort("metadata.created_at", -1).limit(limit)
+            tweets = await cursor.to_list(length=limit)
+
+            # 转换为响应模型
+            return [self._tweet_to_response(tweet) for tweet in tweets]
+
+        except Exception as e:
+            self.logger.error(f"搜索推文失败: {str(e)}")
+            raise
+
+    async def get_tweet_by_id(self, tweet_id: str) -> Optional[TweetResponse]:
+        """根据ID获取推文"""
+        try:
+            tweet = await self.db.tweets.find_one({"tweet_id": tweet_id})
+            return self._tweet_to_response(tweet) if tweet else None
+        except Exception as e:
+            self.logger.error(f"获取推文失败: {str(e)}")
+            raise
+
+    async def get_user_by_username(self, username: str) -> Optional[UserResponse]:
+        """根据用户名获取用户信息"""
+        try:
+            user = await self.db.users.find_one({"username": username})
+            return self._user_to_response(user) if user else None
+        except Exception as e:
+            self.logger.error(f"获取用户失败: {str(e)}")
+            raise
+
+    async def get_trending_topics(self, hours: int = 24, limit: int = 20) -> Dict[str, Any]:
+        """获取热门话题"""
+        try:
+            start_time = datetime.utcnow() - timedelta(hours=hours)
+
+            # 聚合查询热门话题
+            pipeline = [
+                {"$match": {"metadata.created_at": {"$gte": start_time}}},
+                {"$unwind": "$content.hashtags"},
+                {"$group": {
+                    "_id": "$content.hashtags",
+                    "count": {"$sum": 1},
+                    "total_likes": {"$sum": "$metrics.like_count"},
+                    "total_retweets": {"$sum": "$metrics.retweet_count"}
+                }},
+                {"$sort": {"count": -1}},
+                {"$limit": limit}
+            ]
+
+            trending = await self.db.tweets.aggregate(pipeline).to_list(length=limit)
+
+            return {
+                "time_range_hours": hours,
+                "trending_topics": [
+                    {
+                        "hashtag": item["_id"],
+                        "tweet_count": item["count"],
+                        "total_likes": item["total_likes"],
+                        "total_retweets": item["total_retweets"]
+                    }
+                    for item in trending
+                ]
+            }
+
+        except Exception as e:
+            self.logger.error(f"获取热门话题失败: {str(e)}")
+            raise
+
+    def _tweet_to_response(self, tweet: Dict) -> TweetResponse:
+        """转换推文数据为响应模型"""
+        return TweetResponse(
+            tweet_id=tweet["tweet_id"],
+            text=tweet["text"],
+            user=UserInfo(
+                user_id=tweet["user"]["user_id"],
+                username=tweet["user"]["username"],
+                display_name=tweet["user"]["display_name"],
+                verified=tweet["user"].get("verified", False),
+                followers_count=tweet["user"].get("followers_count", 0)
+            ),
+            like_count=tweet["metrics"].get("like_count", 0),
+            retweet_count=tweet["metrics"].get("retweet_count", 0),
+            reply_count=tweet["metrics"].get("reply_count", 0),
+            quote_count=tweet["metrics"].get("quote_count", 0),
+            view_count=tweet["metrics"].get("view_count", 0),
+            hashtags=tweet["content"].get("hashtags", []),
+            mentions=tweet["content"].get("mentions", []),
+            urls=[url["expanded_url"] for url in tweet["content"].get("urls", [])],
+            media=[
+                MediaItem(
+                    type=media["type"],
+                    url=media["url"],
+                    width=media.get("width"),
+                    height=media.get("height")
+                )
+                for media in tweet["content"].get("media", [])
+            ],
+            created_at=tweet["metadata"]["created_at"],
+            collected_at=tweet["metadata"]["collected_at"]
+        )
+
+    def _user_to_response(self, user: Dict) -> UserResponse:
+        """转换用户数据为响应模型"""
+        return UserResponse(
+            user_id=user["user_id"],
+            username=user["username"],
+            display_name=user["display_name"],
+            description=user.get("description"),
+            verified=user["profile"].get("verified", False),
+            protected=user["profile"].get("protected", False),
+            followers_count=user["metrics"].get("followers_count", 0),
+            following_count=user["metrics"].get("following_count", 0),
+            tweet_count=user["metrics"].get("tweet_count", 0),
+            location=user["profile"].get("location"),
+            website=user["profile"].get("website"),
+            profile_image_url=user["profile"].get("profile_image_url"),
+            created_at=user["metadata"].get("created_at"),
+            collected_at=user["metadata"]["collected_at"]
+        )
+```
+
+#### 🎯 **API使用示例**
+
+```bash
+# 1. 搜索推文
+curl -X GET "http://localhost:8000/api/v1/data/tweets/search?keyword=python&limit=50" \
+  -H "Authorization: Bearer your-api-token"
+
+# 2. 获取用户资料
+curl -X GET "http://localhost:8000/api/v1/data/users/elonmusk" \
+  -H "Authorization: Bearer your-api-token"
+
+# 3. 创建搜索任务
+curl -X POST "http://localhost:8000/api/v1/tasks/search" \
+  -H "Authorization: Bearer your-api-token" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "keyword_search",
+    "keyword": "artificial intelligence",
+    "count": 1000,
+    "priority": "high"
+  }'
+
+# 4. 获取系统统计
+curl -X GET "http://localhost:8000/api/v1/admin/stats" \
+  -H "Authorization: Bearer your-api-token"
+
+# 5. 健康检查
+curl -X GET "http://localhost:8000/api/v1/admin/health"
+```
+
+#### 📊 **API响应示例**
+
+```json
+{
+  "tweet_id": "1234567890123456789",
+  "text": "Python is amazing for data science! #python #datascience",
+  "user": {
+    "user_id": "987654321",
+    "username": "data_scientist",
+    "display_name": "Data Scientist",
+    "verified": false,
+    "followers_count": 5000
+  },
+  "like_count": 150,
+  "retweet_count": 45,
+  "reply_count": 12,
+  "quote_count": 8,
+  "view_count": 2500,
+  "hashtags": ["python", "datascience"],
+  "mentions": [],
+  "urls": ["https://example.com/article"],
+  "media": [],
+  "created_at": "2024-01-01T12:00:00Z",
+  "collected_at": "2024-01-01T12:05:00Z"
+}
+```
 
 ## 总结
 
