@@ -1,0 +1,7 @@
+{
+    "auth_token": "YOUR_AUTH_TOKEN_HERE",
+    "ct0": "YOUR_CT0_HERE",
+    "guest_id": "YOUR_GUEST_ID_HERE",
+    "personalization_id": "YOUR_PERSONALIZATION_ID_HERE",
+    "twid": "YOUR_TWID_HERE"
+}
