@@ -140,55 +140,78 @@ async def test_search_functionality():
         return False
 
 async def test_user_functionality():
-    """测试用户信息获取功能"""
+    """测试用户信息获取功能 - 增强版用户查找测试"""
     print("\n👤 测试用户信息获取...")
-    
+
     try:
         from twscrape import API
         api = API()
-        
-        # 测试获取用户信息 (使用指定账号)
-        test_username = "elonmusk"  # 使用elonmusk账号进行测试
-        print(f"🔍 获取用户信息: @{test_username}")
-        
-        user = await api.user_by_login(test_username)
-        if user:
-            # 检查认证状态 - 支持新旧认证系统
-            verification_status = "❌ 未认证"
-            verification_type = "none"
-            if user.verified:
-                verification_status = "✅ 传统认证"
-                verification_type = "legacy"
-            elif hasattr(user, 'blue') and user.blue:
-                verification_status = "🔵 Twitter Blue认证"
-                verification_type = "blue"
 
-            user_info = {
-                'id': user.id,
-                'username': user.username,
-                'display_name': user.displayname,
-                'followers': user.followersCount,
-                'following': user.friendsCount,  # 正确的属性名
-                'tweets': user.statusesCount,
-                'verified': user.verified,
-                'blue_verified': hasattr(user, 'blue') and user.blue,
-                'verification_type': verification_type,
-                'created': user.created.isoformat() if user.created else None
-            }
+        # 检查账号池
+        accounts = await api.pool.get_all()
+        print(f"📊 账号池状态: {len(accounts)} 个账号")
 
-            print(f"✅ 用户信息获取成功:")
-            print(f"   用户名: @{user_info['username']}")
-            print(f"   显示名: {user_info['display_name']}")
-            print(f"   粉丝数: {user_info['followers']:,}")
-            print(f"   关注数: {user_info['following']:,}")
-            print(f"   推文数: {user_info['tweets']:,}")
-            print(f"   认证状态: {verification_status}")
-            
+        if len(accounts) == 0:
+            print("❌ 没有Twitter账号，无法进行用户查找")
+            print("💡 需要先添加Twitter账号:")
+            print("   twscrape add_account username password email email_password")
+            print("   twscrape login_accounts")
+            return False
+
+        # 显示账号状态
+        for account in accounts:
+            status = "✅ 活跃" if account.active else "❌ 不活跃"
+            print(f"   账号: {account.username} - {status}")
+
+        active_accounts = [acc for acc in accounts if acc.active]
+        if len(active_accounts) == 0:
+            print("❌ 没有活跃的Twitter账号")
+            print("💡 请先登录账号: twscrape login_accounts")
+            return False
+
+        # 测试多个用户查找
+        test_usernames = ["elonmusk", "twitter", "wstunnel"]
+        successful_lookups = 0
+
+        for username in test_usernames:
+            print(f"\n🔍 查找用户: @{username}")
+            try:
+                user = await api.user_by_login(username)
+                if user:
+                    print(f"✅ 找到用户: @{user.username}")
+                    print(f"   显示名: {user.displayname}")
+                    print(f"   粉丝数: {user.followersCount:,}")
+                    print(f"   关注数: {user.friendsCount:,}")
+                    print(f"   推文数: {user.statusesCount:,}")
+
+                    # 检查认证状态 - 支持新旧认证系统
+                    verification_status = "❌ 未认证"
+                    if user.verified:
+                        verification_status = "✅ 传统认证"
+                    elif hasattr(user, 'blue') and user.blue:
+                        verification_status = "🔵 Twitter Blue认证"
+
+                    print(f"   认证状态: {verification_status}")
+                    print(f"   创建时间: {user.created}")
+                    print(f"   位置: {user.location if user.location else '未设置'}")
+                    successful_lookups += 1
+
+                    # 添加延迟避免请求过快
+                    await asyncio.sleep(1)
+                else:
+                    print(f"❌ 未找到用户: @{username}")
+            except Exception as e:
+                print(f"❌ 查找失败: {e}")
+                print(f"   错误类型: {type(e).__name__}")
+
+        # 评估测试结果
+        if successful_lookups > 0:
+            print(f"\n✅ 用户查找测试完成: {successful_lookups}/{len(test_usernames)} 成功")
             return True
         else:
-            print(f"❌ 未找到用户: @{test_username}")
+            print(f"\n❌ 所有用户查找都失败了")
             return False
-            
+
     except Exception as e:
         print(f"❌ 用户信息测试失败: {e}")
         return False
