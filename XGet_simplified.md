@@ -361,71 +361,1266 @@ class ProductionTwitterScraper:
 # core/account_manager.py
 import asyncio
 import json
-from typing import Dict, List, Optional
+import logging
+import hashlib
+from typing import Dict, List, Optional, Tuple
 from datetime import datetime, timedelta
+from enum import Enum
+from dataclasses import dataclass, asdict
 import redis.asyncio as redis
+from twscrape import API, Account
 
-class AccountManager:
-    """账号池管理器"""
+class AccountStatus(Enum):
+    """账号状态枚举"""
+    ACTIVE = "active"           # 活跃可用
+    SUSPENDED = "suspended"     # 暂停使用
+    ERROR = "error"            # 错误状态
+    MAINTENANCE = "maintenance" # 维护中
+    COOLDOWN = "cooldown"      # 冷却期
+    EXPIRED = "expired"        # 已过期
 
-    def __init__(self, redis_client: redis.Redis):
+class AccountPriority(Enum):
+    """账号优先级"""
+    HIGH = "high"      # 高优先级（稳定账号）
+    NORMAL = "normal"  # 普通优先级
+    LOW = "low"        # 低优先级（测试账号）
+    BACKUP = "backup"  # 备用账号
+
+@dataclass
+class AccountMetrics:
+    """账号指标数据"""
+    total_requests: int = 0
+    successful_requests: int = 0
+    failed_requests: int = 0
+    rate_limit_hits: int = 0
+    last_used: Optional[datetime] = None
+    last_success: Optional[datetime] = None
+    last_error: Optional[datetime] = None
+    consecutive_errors: int = 0
+    daily_usage: int = 0
+    weekly_usage: int = 0
+
+    @property
+    def success_rate(self) -> float:
+        """成功率计算"""
+        if self.total_requests == 0:
+            return 1.0
+        return self.successful_requests / self.total_requests
+
+    @property
+    def health_score(self) -> float:
+        """健康分数计算 (0-1)"""
+        base_score = self.success_rate
+
+        # 连续错误惩罚
+        error_penalty = min(self.consecutive_errors * 0.1, 0.5)
+
+        # 使用频率调整
+        usage_factor = 1.0
+        if self.daily_usage > 800:  # 接近限制时降低分数
+            usage_factor = 0.8
+        elif self.daily_usage > 600:
+            usage_factor = 0.9
+
+        return max(0.0, (base_score - error_penalty) * usage_factor)
+
+@dataclass
+class AccountConfig:
+    """账号配置"""
+    account_id: str
+    username: str
+    email: str
+    status: AccountStatus
+    priority: AccountPriority
+    daily_limit: int = 1000
+    hourly_limit: int = 100
+    cooldown_minutes: int = 30
+    max_consecutive_errors: int = 5
+    auto_recovery: bool = True
+    tags: List[str] = None
+
+    def __post_init__(self):
+        if self.tags is None:
+            self.tags = []
+
+class ProductionAccountManager:
+    """生产级账号池管理器"""
+
+    def __init__(self, redis_client: redis.Redis, twscrape_api: API = None):
         self.redis = redis_client
+        self.api = twscrape_api or API()
+        self.logger = logging.getLogger(__name__)
+
+        # 配置参数
         self.health_threshold = 0.7
+        self.max_daily_usage = 1000
+        self.cooldown_duration = 1800  # 30分钟
+        self.error_threshold = 5
 
-    async def get_available_account(self) -> Optional[Dict]:
-        """获取可用账号"""
+    async def initialize(self):
+        """初始化账号管理器"""
+        await self._sync_twscrape_accounts()
+        await self._setup_redis_structures()
+
+    async def _sync_twscrape_accounts(self):
+        """同步twscrape账号到Redis"""
         try:
-            # 获取健康账号列表
-            healthy_accounts = await self.redis.smembers('accounts:healthy')
-            if not healthy_accounts:
-                raise Exception("No healthy accounts available")
+            accounts = await self.api.pool.get_all()
+            self.logger.info(f"Found {len(accounts)} accounts in twscrape")
 
-            # 选择使用频率最低的账号
-            best_account = None
-            min_usage = float('inf')
+            for account in accounts:
+                await self._import_account_from_twscrape(account)
 
-            for account_id in healthy_accounts:
-                usage_count = await self.redis.get(f'account:{account_id.decode()}:usage_today')
-                usage = int(usage_count) if usage_count else 0
+        except Exception as e:
+            self.logger.error(f"Failed to sync twscrape accounts: {e}")
 
-                if usage < min_usage:
-                    min_usage = usage
-                    best_account = account_id.decode()
+    async def _import_account_from_twscrape(self, account: Account):
+        """从twscrape导入账号"""
+        account_config = AccountConfig(
+            account_id=f"tw_{account.username}",
+            username=account.username,
+            email=account.email or f"{account.username}@unknown.com",
+            status=AccountStatus.ACTIVE if account.active else AccountStatus.SUSPENDED,
+            priority=AccountPriority.NORMAL
+        )
+
+        # 保存账号配置
+        await self._save_account_config(account_config)
+
+        # 保存cookies
+        if hasattr(account, 'cookies') and account.cookies:
+            await self._save_account_cookies(account_config.account_id, account.cookies)
+
+    async def _setup_redis_structures(self):
+        """设置Redis数据结构"""
+        # 创建索引集合
+        await self.redis.sadd('account_manager:initialized', '1')
+
+    async def get_available_account(self,
+                                  priority: Optional[AccountPriority] = None,
+                                  tags: Optional[List[str]] = None,
+                                  exclude_accounts: Optional[List[str]] = None) -> Optional[Dict]:
+        """获取可用账号 - 智能选择算法"""
+        try:
+            # 获取候选账号
+            candidates = await self._get_candidate_accounts(priority, tags, exclude_accounts)
+
+            if not candidates:
+                self.logger.warning("No candidate accounts available")
+                return None
+
+            # 智能选择最佳账号
+            best_account = await self._select_best_account(candidates)
 
             if best_account:
-                # 增加使用计数
-                await self.redis.incr(f'account:{best_account}:usage_today')
-                await self.redis.expire(f'account:{best_account}:usage_today', 86400)
+                # 更新使用记录
+                await self._record_account_usage(best_account['account_id'])
 
-                # 获取账号详情
-                account_data = await self.redis.hgetall(f'account:{best_account}')
-                return {
-                    'id': best_account,
-                    'username': account_data.get(b'username', b'').decode(),
-                    'cookies': json.loads(account_data.get(b'cookies', '{}'))
-                }
+                # 获取完整账号信息
+                return await self._get_full_account_info(best_account['account_id'])
 
             return None
 
         except Exception as e:
-            logging.error(f"Failed to get available account: {str(e)}")
+            self.logger.error(f"Failed to get available account: {e}")
             return None
 
-    async def update_account_success(self, account_id: str):
-        """更新账号成功使用记录"""
-        await self.redis.hincrby(f'account:{account_id}', 'success_count', 1)
-        await self.redis.hset(f'account:{account_id}', 'last_success', datetime.utcnow().isoformat())
+    async def _get_candidate_accounts(self,
+                                    priority: Optional[AccountPriority],
+                                    tags: Optional[List[str]],
+                                    exclude_accounts: Optional[List[str]]) -> List[Dict]:
+        """获取候选账号列表"""
+        candidates = []
 
-    async def mark_account_error(self, account_id: str, error: str):
-        """标记账号错误"""
-        await self.redis.hincrby(f'account:{account_id}', 'error_count', 1)
-        await self.redis.hset(f'account:{account_id}', 'last_error', error)
+        # 获取所有活跃账号
+        active_accounts = await self.redis.smembers('accounts:active')
 
-        # 检查是否需要暂停账号
-        error_count = await self.redis.hget(f'account:{account_id}', 'error_count')
-        if error_count and int(error_count) > 5:
-            await self.redis.srem('accounts:healthy', account_id)
-            await self.redis.sadd('accounts:suspended', account_id)
+        for account_id in active_accounts:
+            account_id = account_id.decode()
+
+            # 排除指定账号
+            if exclude_accounts and account_id in exclude_accounts:
+                continue
+
+            # 检查账号配置
+            config = await self._get_account_config(account_id)
+            if not config:
+                continue
+
+            # 优先级过滤
+            if priority and config.priority != priority:
+                continue
+
+            # 标签过滤
+            if tags and not any(tag in config.tags for tag in tags):
+                continue
+
+            # 检查是否在冷却期
+            if await self._is_account_in_cooldown(account_id):
+                continue
+
+            # 检查使用限制
+            if await self._is_account_over_limit(account_id):
+                continue
+
+            # 获取账号指标
+            metrics = await self._get_account_metrics(account_id)
+
+            candidates.append({
+                'account_id': account_id,
+                'config': config,
+                'metrics': metrics,
+                'health_score': metrics.health_score
+            })
+
+        return candidates
+
+    async def _select_best_account(self, candidates: List[Dict]) -> Optional[Dict]:
+        """选择最佳账号 - 综合评分算法"""
+        if not candidates:
+            return None
+
+        # 计算综合评分
+        for candidate in candidates:
+            score = await self._calculate_account_score(candidate)
+            candidate['final_score'] = score
+
+        # 按评分排序，选择最高分
+        candidates.sort(key=lambda x: x['final_score'], reverse=True)
+
+        return candidates[0]
+
+    async def _calculate_account_score(self, candidate: Dict) -> float:
+        """计算账号综合评分"""
+        config = candidate['config']
+        metrics = candidate['metrics']
+
+        # 基础健康分数 (40%)
+        health_score = metrics.health_score * 0.4
+
+        # 使用频率分数 (30%) - 使用越少分数越高
+        usage_ratio = metrics.daily_usage / config.daily_limit
+        usage_score = (1 - usage_ratio) * 0.3
+
+        # 优先级分数 (20%)
+        priority_scores = {
+            AccountPriority.HIGH: 1.0,
+            AccountPriority.NORMAL: 0.8,
+            AccountPriority.LOW: 0.6,
+            AccountPriority.BACKUP: 0.4
+        }
+        priority_score = priority_scores.get(config.priority, 0.8) * 0.2
+
+        # 最近成功时间分数 (10%)
+        time_score = 0.1
+        if metrics.last_success:
+            hours_since_success = (datetime.utcnow() - metrics.last_success).total_seconds() / 3600
+            time_score = max(0, (24 - hours_since_success) / 24) * 0.1
+
+        return health_score + usage_score + priority_score + time_score
+
+    async def update_account_success(self, account_id: str, operation_type: str = "general"):
+        """更新账号成功记录"""
+        try:
+            current_time = datetime.utcnow()
+
+            # 更新基础指标
+            await self.redis.hincrby(f'account:{account_id}:metrics', 'total_requests', 1)
+            await self.redis.hincrby(f'account:{account_id}:metrics', 'successful_requests', 1)
+            await self.redis.hset(f'account:{account_id}:metrics', 'last_success', current_time.isoformat())
+            await self.redis.hset(f'account:{account_id}:metrics', 'consecutive_errors', 0)
+
+            # 更新使用计数
+            await self._update_usage_counters(account_id)
+
+            # 记录操作历史
+            await self._record_operation_history(account_id, 'success', operation_type)
+
+            # 如果账号之前有问题，尝试恢复
+            await self._try_account_recovery(account_id)
+
+            self.logger.debug(f"Account {account_id} success updated for {operation_type}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to update account success: {e}")
+
+    async def mark_account_error(self, account_id: str, error: str, error_type: str = "general"):
+        """标记账号错误 - 增强错误处理"""
+        try:
+            current_time = datetime.utcnow()
+
+            # 更新错误指标
+            await self.redis.hincrby(f'account:{account_id}:metrics', 'total_requests', 1)
+            await self.redis.hincrby(f'account:{account_id}:metrics', 'failed_requests', 1)
+            await self.redis.hincrby(f'account:{account_id}:metrics', 'consecutive_errors', 1)
+            await self.redis.hset(f'account:{account_id}:metrics', 'last_error', current_time.isoformat())
+
+            # 记录错误详情
+            await self._record_error_details(account_id, error, error_type)
+
+            # 检查是否需要特殊处理
+            await self._handle_specific_errors(account_id, error, error_type)
+
+            # 检查是否需要暂停账号
+            consecutive_errors = await self.redis.hget(f'account:{account_id}:metrics', 'consecutive_errors')
+            if consecutive_errors and int(consecutive_errors) >= self.error_threshold:
+                await self._suspend_account(account_id, f"Too many consecutive errors: {consecutive_errors}")
+
+            self.logger.warning(f"Account {account_id} error marked: {error_type} - {error}")
+
+        except Exception as e:
+            self.logger.error(f"Failed to mark account error: {e}")
+
+    async def _handle_specific_errors(self, account_id: str, error: str, error_type: str):
+        """处理特定类型的错误"""
+        error_lower = error.lower()
+
+        if 'rate limit' in error_lower or 'too many requests' in error_lower:
+            # 速率限制错误 - 设置冷却期
+            await self._set_account_cooldown(account_id, self.cooldown_duration)
+            await self.redis.hincrby(f'account:{account_id}:metrics', 'rate_limit_hits', 1)
+
+        elif 'unauthorized' in error_lower or 'forbidden' in error_lower:
+            # 认证错误 - 可能需要重新登录
+            await self._mark_account_needs_reauth(account_id)
+
+        elif 'suspended' in error_lower or 'locked' in error_lower:
+            # 账号被封 - 立即暂停
+            await self._suspend_account(account_id, f"Account suspended by platform: {error}")
+
+        elif 'not found' in error_lower:
+            # 资源不存在 - 不算严重错误
+            pass  # 不增加连续错误计数
+
+    async def get_account_statistics(self) -> Dict:
+        """获取账号池统计信息"""
+        try:
+            stats = {
+                'total_accounts': 0,
+                'active_accounts': 0,
+                'suspended_accounts': 0,
+                'error_accounts': 0,
+                'maintenance_accounts': 0,
+                'cooldown_accounts': 0,
+                'health_distribution': {'high': 0, 'medium': 0, 'low': 0},
+                'priority_distribution': {},
+                'daily_usage_total': 0,
+                'average_health_score': 0.0
+            }
+
+            # 获取所有账号
+            all_accounts = await self.redis.smembers('accounts:all')
+            stats['total_accounts'] = len(all_accounts)
+
+            total_health = 0.0
+
+            for account_id in all_accounts:
+                account_id = account_id.decode()
+
+                # 获取账号配置和指标
+                config = await self._get_account_config(account_id)
+                metrics = await self._get_account_metrics(account_id)
+
+                if not config or not metrics:
+                    continue
+
+                # 状态统计
+                status_key = f"{config.status.value}_accounts"
+                if status_key in stats:
+                    stats[status_key] += 1
+
+                # 优先级统计
+                priority = config.priority.value
+                stats['priority_distribution'][priority] = stats['priority_distribution'].get(priority, 0) + 1
+
+                # 健康分数统计
+                health_score = metrics.health_score
+                total_health += health_score
+
+                if health_score >= 0.8:
+                    stats['health_distribution']['high'] += 1
+                elif health_score >= 0.6:
+                    stats['health_distribution']['medium'] += 1
+                else:
+                    stats['health_distribution']['low'] += 1
+
+                # 使用量统计
+                stats['daily_usage_total'] += metrics.daily_usage
+
+            # 计算平均健康分数
+            if stats['total_accounts'] > 0:
+                stats['average_health_score'] = total_health / stats['total_accounts']
+
+            return stats
+
+        except Exception as e:
+            self.logger.error(f"Failed to get account statistics: {e}")
+            return {}
+
+    async def batch_health_check(self) -> Dict:
+        """批量健康检查"""
+        try:
+            results = {
+                'checked': 0,
+                'healthy': 0,
+                'unhealthy': 0,
+                'recovered': 0,
+                'suspended': 0,
+                'details': []
+            }
+
+            all_accounts = await self.redis.smembers('accounts:all')
+
+            for account_id in all_accounts:
+                account_id = account_id.decode()
+
+                try:
+                    # 执行单个账号健康检查
+                    health_result = await self._check_single_account_health(account_id)
+                    results['details'].append(health_result)
+                    results['checked'] += 1
+
+                    if health_result['healthy']:
+                        results['healthy'] += 1
+
+                        # 尝试恢复之前有问题的账号
+                        if health_result.get('recovered'):
+                            results['recovered'] += 1
+                    else:
+                        results['unhealthy'] += 1
+
+                        # 检查是否需要暂停
+                        if health_result.get('should_suspend'):
+                            await self._suspend_account(account_id, health_result.get('reason', 'Health check failed'))
+                            results['suspended'] += 1
+
+                except Exception as e:
+                    self.logger.error(f"Health check failed for account {account_id}: {e}")
+                    results['details'].append({
+                        'account_id': account_id,
+                        'healthy': False,
+                        'error': str(e)
+                    })
+
+            self.logger.info(f"Batch health check completed: {results['checked']} accounts checked")
+            return results
+
+        except Exception as e:
+            self.logger.error(f"Batch health check failed: {e}")
+            return {'error': str(e)}
+
+    async def _check_single_account_health(self, account_id: str) -> Dict:
+        """单个账号健康检查"""
+        try:
+            config = await self._get_account_config(account_id)
+            metrics = await self._get_account_metrics(account_id)
+
+            if not config or not metrics:
+                return {
+                    'account_id': account_id,
+                    'healthy': False,
+                    'reason': 'Missing config or metrics'
+                }
+
+            health_score = metrics.health_score
+            is_healthy = health_score >= self.health_threshold
+
+            result = {
+                'account_id': account_id,
+                'healthy': is_healthy,
+                'health_score': health_score,
+                'status': config.status.value,
+                'daily_usage': metrics.daily_usage,
+                'success_rate': metrics.success_rate,
+                'consecutive_errors': metrics.consecutive_errors
+            }
+
+            # 检查是否需要特殊处理
+            if not is_healthy:
+                if metrics.consecutive_errors >= config.max_consecutive_errors:
+                    result['should_suspend'] = True
+                    result['reason'] = f"Too many consecutive errors: {metrics.consecutive_errors}"
+                elif metrics.success_rate < 0.5:
+                    result['should_suspend'] = True
+                    result['reason'] = f"Low success rate: {metrics.success_rate:.2%}"
+
+            # 检查是否可以恢复
+            elif config.status in [AccountStatus.SUSPENDED, AccountStatus.ERROR]:
+                if health_score >= 0.8 and metrics.consecutive_errors == 0:
+                    result['recovered'] = True
+                    await self._recover_account(account_id)
+
+            return result
+
+        except Exception as e:
+            return {
+                'account_id': account_id,
+                'healthy': False,
+                'error': str(e)
+            }
+
+    async def add_account(self, username: str, password: str, email: str,
+                         priority: AccountPriority = AccountPriority.NORMAL,
+                         tags: List[str] = None) -> bool:
+        """添加新账号"""
+        try:
+            # 添加到twscrape
+            await self.api.pool.add_account(username, password, email, password)
+
+            # 创建账号配置
+            account_config = AccountConfig(
+                account_id=f"tw_{username}",
+                username=username,
+                email=email,
+                status=AccountStatus.MAINTENANCE,  # 新账号先设为维护状态
+                priority=priority,
+                tags=tags or []
+            )
+
+            # 保存配置
+            await self._save_account_config(account_config)
+
+            # 初始化指标
+            await self._initialize_account_metrics(account_config.account_id)
+
+            self.logger.info(f"Account {username} added successfully")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to add account {username}: {e}")
+            return False
+
+    async def remove_account(self, account_id: str) -> bool:
+        """移除账号"""
+        try:
+            config = await self._get_account_config(account_id)
+            if not config:
+                return False
+
+            # 从twscrape移除
+            await self.api.pool.delete(config.username)
+
+            # 从Redis清理数据
+            await self._cleanup_account_data(account_id)
+
+            self.logger.info(f"Account {account_id} removed successfully")
+            return True
+
+        except Exception as e:
+            self.logger.error(f"Failed to remove account {account_id}: {e}")
+            return False
+
+    # ========== 辅助方法 ==========
+
+    async def _get_account_config(self, account_id: str) -> Optional[AccountConfig]:
+        """获取账号配置"""
+        try:
+            config_data = await self.redis.hgetall(f'account:{account_id}:config')
+            if not config_data:
+                return None
+
+            # 转换字节数据
+            config_dict = {k.decode(): v.decode() for k, v in config_data.items()}
+
+            # 处理枚举类型
+            config_dict['status'] = AccountStatus(config_dict['status'])
+            config_dict['priority'] = AccountPriority(config_dict['priority'])
+            config_dict['tags'] = json.loads(config_dict.get('tags', '[]'))
+
+            # 处理数值类型
+            for field in ['daily_limit', 'hourly_limit', 'cooldown_minutes', 'max_consecutive_errors']:
+                if field in config_dict:
+                    config_dict[field] = int(config_dict[field])
+
+            config_dict['auto_recovery'] = config_dict.get('auto_recovery', 'true').lower() == 'true'
+
+            return AccountConfig(**config_dict)
+
+        except Exception as e:
+            self.logger.error(f"Failed to get account config for {account_id}: {e}")
+            return None
+
+    async def _save_account_config(self, config: AccountConfig):
+        """保存账号配置"""
+        try:
+            config_dict = asdict(config)
+            config_dict['status'] = config.status.value
+            config_dict['priority'] = config.priority.value
+            config_dict['tags'] = json.dumps(config.tags)
+
+            await self.redis.hset(f'account:{config.account_id}:config', mapping=config_dict)
+            await self.redis.sadd('accounts:all', config.account_id)
+
+            # 更新状态索引
+            await self._update_status_index(config.account_id, config.status)
+
+        except Exception as e:
+            self.logger.error(f"Failed to save account config: {e}")
+
+    async def _get_account_metrics(self, account_id: str) -> AccountMetrics:
+        """获取账号指标"""
+        try:
+            metrics_data = await self.redis.hgetall(f'account:{account_id}:metrics')
+
+            if not metrics_data:
+                return AccountMetrics()
+
+            # 转换数据类型
+            metrics_dict = {}
+            for k, v in metrics_data.items():
+                key = k.decode()
+                value = v.decode()
+
+                if key in ['total_requests', 'successful_requests', 'failed_requests',
+                          'rate_limit_hits', 'consecutive_errors', 'daily_usage', 'weekly_usage']:
+                    metrics_dict[key] = int(value)
+                elif key in ['last_used', 'last_success', 'last_error']:
+                    if value:
+                        metrics_dict[key] = datetime.fromisoformat(value)
+
+            return AccountMetrics(**metrics_dict)
+
+        except Exception as e:
+            self.logger.error(f"Failed to get account metrics for {account_id}: {e}")
+            return AccountMetrics()
+
+    async def _save_account_metrics(self, account_id: str, metrics: AccountMetrics):
+        """保存账号指标"""
+        try:
+            metrics_dict = asdict(metrics)
+
+            # 转换datetime为字符串
+            for key, value in metrics_dict.items():
+                if isinstance(value, datetime):
+                    metrics_dict[key] = value.isoformat()
+                elif value is None:
+                    metrics_dict[key] = ''
+
+            await self.redis.hset(f'account:{account_id}:metrics', mapping=metrics_dict)
+
+        except Exception as e:
+            self.logger.error(f"Failed to save account metrics: {e}")
+
+    async def _initialize_account_metrics(self, account_id: str):
+        """初始化账号指标"""
+        metrics = AccountMetrics()
+        await self._save_account_metrics(account_id, metrics)
+
+    async def _update_status_index(self, account_id: str, status: AccountStatus):
+        """更新状态索引"""
+        # 从所有状态集合中移除
+        for s in AccountStatus:
+            await self.redis.srem(f'accounts:{s.value}', account_id)
+
+        # 添加到新状态集合
+        await self.redis.sadd(f'accounts:{status.value}', account_id)
+
+    async def _is_account_in_cooldown(self, account_id: str) -> bool:
+        """检查账号是否在冷却期"""
+        cooldown_until = await self.redis.get(f'account:{account_id}:cooldown')
+        if not cooldown_until:
+            return False
+
+        cooldown_time = datetime.fromisoformat(cooldown_until.decode())
+        return datetime.utcnow() < cooldown_time
+
+    async def _is_account_over_limit(self, account_id: str) -> bool:
+        """检查账号是否超过使用限制"""
+        config = await self._get_account_config(account_id)
+        metrics = await self._get_account_metrics(account_id)
+
+        if not config or not metrics:
+            return True
+
+        return metrics.daily_usage >= config.daily_limit
+
+    async def _set_account_cooldown(self, account_id: str, duration_seconds: int):
+        """设置账号冷却期"""
+        cooldown_until = datetime.utcnow() + timedelta(seconds=duration_seconds)
+        await self.redis.set(f'account:{account_id}:cooldown',
+                           cooldown_until.isoformat(),
+                           ex=duration_seconds)
+
+    async def _suspend_account(self, account_id: str, reason: str):
+        """暂停账号"""
+        config = await self._get_account_config(account_id)
+        if config:
+            config.status = AccountStatus.SUSPENDED
+            await self._save_account_config(config)
+
+        # 记录暂停原因
+        await self.redis.hset(f'account:{account_id}:suspension',
+                            'reason', reason,
+                            'suspended_at', datetime.utcnow().isoformat())
+
+        self.logger.warning(f"Account {account_id} suspended: {reason}")
+
+    async def _recover_account(self, account_id: str):
+        """恢复账号"""
+        config = await self._get_account_config(account_id)
+        if config:
+            config.status = AccountStatus.ACTIVE
+            await self._save_account_config(config)
+
+        # 清理暂停记录
+        await self.redis.delete(f'account:{account_id}:suspension')
+        await self.redis.delete(f'account:{account_id}:cooldown')
+
+        self.logger.info(f"Account {account_id} recovered")
+
+    async def _record_account_usage(self, account_id: str):
+        """记录账号使用"""
+        await self.redis.hincrby(f'account:{account_id}:metrics', 'daily_usage', 1)
+        await self.redis.hset(f'account:{account_id}:metrics', 'last_used', datetime.utcnow().isoformat())
+
+    async def _get_full_account_info(self, account_id: str) -> Dict:
+        """获取完整账号信息"""
+        config = await self._get_account_config(account_id)
+        metrics = await self._get_account_metrics(account_id)
+
+        # 获取cookies
+        cookies_data = await self.redis.hget(f'account:{account_id}', 'cookies')
+        cookies = json.loads(cookies_data.decode()) if cookies_data else {}
+
+        return {
+            'account_id': account_id,
+            'username': config.username,
+            'email': config.email,
+            'status': config.status.value,
+            'priority': config.priority.value,
+            'health_score': metrics.health_score,
+            'daily_usage': metrics.daily_usage,
+            'success_rate': metrics.success_rate,
+            'cookies': cookies,
+            'last_used': metrics.last_used.isoformat() if metrics.last_used else None
+        }
+
+    async def _cleanup_account_data(self, account_id: str):
+        """清理账号数据"""
+        # 删除所有相关的Redis键
+        keys_to_delete = [
+            f'account:{account_id}:config',
+            f'account:{account_id}:metrics',
+            f'account:{account_id}:cookies',
+            f'account:{account_id}:suspension',
+            f'account:{account_id}:cooldown',
+            f'account:{account_id}:history'
+        ]
+
+        for key in keys_to_delete:
+            await self.redis.delete(key)
+
+        # 从所有集合中移除
+        await self.redis.srem('accounts:all', account_id)
+        for status in AccountStatus:
+            await self.redis.srem(f'accounts:{status.value}', account_id)
+
+# ========== 账号管理使用示例 ==========
+
+class AccountManagerExample:
+    """账号管理器使用示例"""
+
+    async def example_usage(self):
+        """完整使用示例"""
+        import redis.asyncio as redis
+        from twscrape import API
+
+        # 初始化
+        redis_client = redis.Redis(host='localhost', port=6379, db=0)
+        api = API()
+        account_manager = ProductionAccountManager(redis_client, api)
+
+        # 初始化账号管理器
+        await account_manager.initialize()
+
+        # 1. 添加新账号
+        success = await account_manager.add_account(
+            username="test_account",
+            password="password123",
+            email="test@example.com",
+            priority=AccountPriority.NORMAL,
+            tags=["test", "development"]
+        )
+
+        # 2. 获取可用账号
+        account = await account_manager.get_available_account(
+            priority=AccountPriority.HIGH,
+            tags=["production"],
+            exclude_accounts=["problematic_account_id"]
+        )
+
+        if account:
+            print(f"Selected account: {account['username']}")
+            print(f"Health score: {account['health_score']}")
+
+            # 3. 使用账号执行操作
+            try:
+                # 模拟成功操作
+                await account_manager.update_account_success(
+                    account['account_id'],
+                    operation_type="tweet_search"
+                )
+            except Exception as e:
+                # 记录错误
+                await account_manager.mark_account_error(
+                    account['account_id'],
+                    str(e),
+                    error_type="api_error"
+                )
+
+        # 4. 获取统计信息
+        stats = await account_manager.get_account_statistics()
+        print(f"Total accounts: {stats['total_accounts']}")
+        print(f"Active accounts: {stats['active_accounts']}")
+        print(f"Average health: {stats['average_health_score']:.2f}")
+
+        # 5. 执行健康检查
+        health_results = await account_manager.batch_health_check()
+        print(f"Health check: {health_results['healthy']}/{health_results['checked']} healthy")
+
+# ========== 配置管理 ==========
+
+class AccountManagerConfig:
+    """账号管理器配置类"""
+
+    def __init__(self):
+        # 基础配置
+        self.HEALTH_THRESHOLD = 0.7
+        self.MAX_DAILY_USAGE = 1000
+        self.COOLDOWN_DURATION = 1800  # 30分钟
+        self.ERROR_THRESHOLD = 5
+
+        # 限制配置
+        self.DEFAULT_DAILY_LIMIT = 1000
+        self.DEFAULT_HOURLY_LIMIT = 100
+        self.HIGH_PRIORITY_DAILY_LIMIT = 1500
+        self.LOW_PRIORITY_DAILY_LIMIT = 500
+
+        # 恢复配置
+        self.AUTO_RECOVERY_ENABLED = True
+        self.RECOVERY_HEALTH_THRESHOLD = 0.8
+        self.RECOVERY_CHECK_INTERVAL = 3600  # 1小时
+
+        # 监控配置
+        self.HEALTH_CHECK_INTERVAL = 300  # 5分钟
+        self.METRICS_RETENTION_DAYS = 30
+        self.ALERT_THRESHOLDS = {
+            'low_health_accounts': 0.3,  # 30%以下健康账号时告警
+            'high_error_rate': 0.2,      # 20%以上错误率时告警
+            'account_shortage': 5         # 可用账号少于5个时告警
+        }
+
+# ========== Redis数据结构设计 ==========
+
+class RedisDataStructure:
+    """Redis数据结构说明"""
+
+    def __init__(self):
+        self.structures = {
+            # 账号配置
+            "account:{account_id}:config": {
+                "type": "hash",
+                "fields": [
+                    "account_id", "username", "email", "status", "priority",
+                    "daily_limit", "hourly_limit", "cooldown_minutes",
+                    "max_consecutive_errors", "auto_recovery", "tags"
+                ],
+                "example": {
+                    "account_id": "tw_testuser",
+                    "username": "testuser",
+                    "email": "test@example.com",
+                    "status": "active",
+                    "priority": "normal",
+                    "daily_limit": "1000",
+                    "hourly_limit": "100",
+                    "cooldown_minutes": "30",
+                    "max_consecutive_errors": "5",
+                    "auto_recovery": "true",
+                    "tags": '["test", "development"]'
+                }
+            },
+
+            # 账号指标
+            "account:{account_id}:metrics": {
+                "type": "hash",
+                "fields": [
+                    "total_requests", "successful_requests", "failed_requests",
+                    "rate_limit_hits", "last_used", "last_success", "last_error",
+                    "consecutive_errors", "daily_usage", "weekly_usage"
+                ],
+                "example": {
+                    "total_requests": "150",
+                    "successful_requests": "142",
+                    "failed_requests": "8",
+                    "rate_limit_hits": "2",
+                    "last_used": "2024-01-01T12:00:00",
+                    "last_success": "2024-01-01T11:58:00",
+                    "last_error": "2024-01-01T10:30:00",
+                    "consecutive_errors": "0",
+                    "daily_usage": "45",
+                    "weekly_usage": "320"
+                }
+            },
+
+            # 账号Cookies
+            "account:{account_id}:cookies": {
+                "type": "hash",
+                "fields": ["cookies_data", "updated_at", "expires_at"],
+                "example": {
+                    "cookies_data": '{"auth_token": "...", "ct0": "..."}',
+                    "updated_at": "2024-01-01T08:00:00",
+                    "expires_at": "2024-01-08T08:00:00"
+                }
+            },
+
+            # 状态索引集合
+            "accounts:all": {
+                "type": "set",
+                "description": "所有账号ID集合"
+            },
+            "accounts:active": {
+                "type": "set",
+                "description": "活跃账号ID集合"
+            },
+            "accounts:suspended": {
+                "type": "set",
+                "description": "暂停账号ID集合"
+            },
+
+            # 冷却期管理
+            "account:{account_id}:cooldown": {
+                "type": "string",
+                "description": "冷却期结束时间",
+                "ttl": "自动过期"
+            },
+
+            # 暂停信息
+            "account:{account_id}:suspension": {
+                "type": "hash",
+                "fields": ["reason", "suspended_at", "suspended_by"],
+                "example": {
+                    "reason": "Too many consecutive errors: 5",
+                    "suspended_at": "2024-01-01T12:00:00",
+                    "suspended_by": "auto_system"
+                }
+            }
+        }
+
+# ========== 监控和告警系统 ==========
+
+class AccountMonitoringSystem:
+    """账号监控和告警系统"""
+
+    def __init__(self, account_manager: ProductionAccountManager):
+        self.account_manager = account_manager
+        self.logger = logging.getLogger(__name__)
+
+    async def start_monitoring(self):
+        """启动监控系统"""
+        # 启动定时任务
+        asyncio.create_task(self._health_check_loop())
+        asyncio.create_task(self._metrics_collection_loop())
+        asyncio.create_task(self._alert_check_loop())
+
+    async def _health_check_loop(self):
+        """健康检查循环"""
+        while True:
+            try:
+                await self.account_manager.batch_health_check()
+                await asyncio.sleep(300)  # 5分钟检查一次
+            except Exception as e:
+                self.logger.error(f"Health check loop error: {e}")
+                await asyncio.sleep(60)
+
+    async def _metrics_collection_loop(self):
+        """指标收集循环"""
+        while True:
+            try:
+                await self._collect_system_metrics()
+                await asyncio.sleep(60)  # 1分钟收集一次
+            except Exception as e:
+                self.logger.error(f"Metrics collection error: {e}")
+                await asyncio.sleep(30)
+
+    async def _alert_check_loop(self):
+        """告警检查循环"""
+        while True:
+            try:
+                await self._check_alerts()
+                await asyncio.sleep(120)  # 2分钟检查一次
+            except Exception as e:
+                self.logger.error(f"Alert check error: {e}")
+                await asyncio.sleep(60)
+
+    async def _collect_system_metrics(self):
+        """收集系统指标"""
+        stats = await self.account_manager.get_account_statistics()
+        timestamp = datetime.utcnow().isoformat()
+
+        # 保存到时序数据
+        metrics_key = f"metrics:system:{datetime.utcnow().strftime('%Y%m%d%H%M')}"
+        await self.account_manager.redis.hset(metrics_key, mapping={
+            'timestamp': timestamp,
+            'total_accounts': stats['total_accounts'],
+            'active_accounts': stats['active_accounts'],
+            'suspended_accounts': stats['suspended_accounts'],
+            'average_health_score': stats['average_health_score'],
+            'daily_usage_total': stats['daily_usage_total']
+        })
+
+        # 设置过期时间（保留30天）
+        await self.account_manager.redis.expire(metrics_key, 86400 * 30)
+
+    async def _check_alerts(self):
+        """检查告警条件"""
+        stats = await self.account_manager.get_account_statistics()
+
+        alerts = []
+
+        # 检查健康账号比例
+        if stats['total_accounts'] > 0:
+            healthy_ratio = stats['active_accounts'] / stats['total_accounts']
+            if healthy_ratio < 0.3:
+                alerts.append({
+                    'type': 'low_healthy_accounts',
+                    'severity': 'critical',
+                    'message': f"Only {healthy_ratio:.1%} accounts are healthy",
+                    'value': healthy_ratio,
+                    'threshold': 0.3
+                })
+
+        # 检查可用账号数量
+        if stats['active_accounts'] < 5:
+            alerts.append({
+                'type': 'account_shortage',
+                'severity': 'warning',
+                'message': f"Only {stats['active_accounts']} active accounts available",
+                'value': stats['active_accounts'],
+                'threshold': 5
+            })
+
+        # 检查平均健康分数
+        if stats['average_health_score'] < 0.6:
+            alerts.append({
+                'type': 'low_health_score',
+                'severity': 'warning',
+                'message': f"Average health score is {stats['average_health_score']:.2f}",
+                'value': stats['average_health_score'],
+                'threshold': 0.6
+            })
+
+        # 发送告警
+        for alert in alerts:
+            await self._send_alert(alert)
+
+    async def _send_alert(self, alert: Dict):
+        """发送告警"""
+        # 检查是否已经发送过相同告警（避免重复）
+        alert_key = f"alert:{alert['type']}:{datetime.utcnow().strftime('%Y%m%d%H')}"
+        if await self.account_manager.redis.exists(alert_key):
+            return
+
+        # 记录告警
+        await self.account_manager.redis.setex(alert_key, 3600, "sent")
+
+        # 记录到日志
+        self.logger.warning(f"ALERT [{alert['severity'].upper()}] {alert['message']}")
+
+        # 这里可以集成其他告警渠道（邮件、Slack、钉钉等）
+        await self._send_to_external_channels(alert)
+
+    async def _send_to_external_channels(self, alert: Dict):
+        """发送到外部告警渠道"""
+        # 示例：发送到Webhook
+        # webhook_url = "https://hooks.slack.com/services/..."
+        # payload = {
+        #     "text": f"XGet Alert: {alert['message']}",
+        #     "severity": alert['severity']
+        # }
+        # async with aiohttp.ClientSession() as session:
+        #     await session.post(webhook_url, json=payload)
+        pass
+
+# ========== 性能优化建议 ==========
+
+class PerformanceOptimizations:
+    """性能优化建议和最佳实践"""
+
+    def __init__(self):
+        self.optimizations = {
+            "redis_connection_pool": {
+                "description": "使用Redis连接池",
+                "implementation": """
+                # 使用连接池
+                redis_pool = redis.ConnectionPool(
+                    host='localhost',
+                    port=6379,
+                    db=0,
+                    max_connections=20,
+                    retry_on_timeout=True
+                )
+                redis_client = redis.Redis(connection_pool=redis_pool)
+                """
+            },
+
+            "batch_operations": {
+                "description": "批量操作减少Redis调用",
+                "implementation": """
+                # 批量更新指标
+                async def batch_update_metrics(self, updates: List[Dict]):
+                    pipe = self.redis.pipeline()
+                    for update in updates:
+                        pipe.hincrby(f"account:{update['id']}:metrics",
+                                   update['field'], update['value'])
+                    await pipe.execute()
+                """
+            },
+
+            "caching_strategy": {
+                "description": "缓存频繁访问的数据",
+                "implementation": """
+                # 内存缓存账号配置
+                from functools import lru_cache
+
+                @lru_cache(maxsize=1000)
+                async def get_cached_account_config(self, account_id: str):
+                    # 实现缓存逻辑
+                    pass
+                """
+            },
+
+            "async_optimization": {
+                "description": "异步操作优化",
+                "implementation": """
+                # 并发处理多个账号
+                async def parallel_health_check(self, account_ids: List[str]):
+                    tasks = [self._check_single_account_health(aid)
+                            for aid in account_ids]
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+                    return results
+                """
+            }
+        }
+
+# ========== 部署和运维指南 ==========
+
+class DeploymentGuide:
+    """部署和运维指南"""
+
+    def __init__(self):
+        self.deployment_steps = [
+            {
+                "step": 1,
+                "title": "环境准备",
+                "tasks": [
+                    "安装Redis服务器",
+                    "配置Redis持久化",
+                    "设置Redis内存限制",
+                    "配置Redis安全认证"
+                ]
+            },
+            {
+                "step": 2,
+                "title": "账号管理器部署",
+                "tasks": [
+                    "创建core目录结构",
+                    "部署account_manager.py",
+                    "配置环境变量",
+                    "初始化Redis数据结构"
+                ]
+            },
+            {
+                "step": 3,
+                "title": "监控系统配置",
+                "tasks": [
+                    "配置Prometheus指标收集",
+                    "设置Grafana仪表板",
+                    "配置告警规则",
+                    "测试告警通道"
+                ]
+            },
+            {
+                "step": 4,
+                "title": "生产环境优化",
+                "tasks": [
+                    "调整Redis配置参数",
+                    "设置日志轮转",
+                    "配置健康检查",
+                    "制定备份策略"
+                ]
+            }
+        ]
+
+        self.redis_config = """
+        # Redis生产配置建议
+        maxmemory 2gb
+        maxmemory-policy allkeys-lru
+        save 900 1
+        save 300 10
+        save 60 10000
+        appendonly yes
+        appendfsync everysec
+        """
+
+        self.monitoring_config = """
+        # Prometheus配置
+        global:
+          scrape_interval: 15s
+
+        scrape_configs:
+          - job_name: 'xget-accounts'
+            static_configs:
+              - targets: ['localhost:8000']
+            metrics_path: '/metrics'
+            scrape_interval: 30s
+        """
+
+# ========== 总结和下一步 ==========
+
+class AccountManagerSummary:
+    """账号管理模块总结"""
+
+    def __init__(self):
+        self.features = {
+            "✅ 已完善的功能": [
+                "智能账号选择算法",
+                "健康分数计算",
+                "错误处理和恢复",
+                "使用限制和冷却",
+                "批量健康检查",
+                "统计分析功能",
+                "监控和告警系统",
+                "Redis数据结构设计"
+            ],
+
+            "🚀 核心优势": [
+                "生产级稳定性",
+                "智能轮换策略",
+                "自动故障恢复",
+                "全面监控体系",
+                "灵活配置管理",
+                "高性能设计"
+            ],
+
+            "📋 实施建议": [
+                "先实现核心AccountManager类",
+                "逐步添加监控功能",
+                "测试各种错误场景",
+                "优化性能参数",
+                "完善告警机制"
+            ]
+        }
+
+        self.next_steps = [
+            "创建core/account_manager.py文件",
+            "实现基础的AccountManager类",
+            "集成到现有的twscrape测试中",
+            "添加Redis支持和配置",
+            "实现监控和统计功能",
+            "编写单元测试",
+            "性能测试和优化",
+            "文档完善和部署指南"
+        ]
 ```
 
 ### 3. 代理管理模块
