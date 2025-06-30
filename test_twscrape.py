@@ -144,11 +144,21 @@ async def test_user_functionality():
         api = API()
         
         # 测试获取用户信息 (使用指定账号)
-        test_username = "wstunnel"  # 使用wstunnel账号进行测试
+        test_username = "elonmusk"  # 使用elonmusk账号进行测试
         print(f"🔍 获取用户信息: @{test_username}")
         
         user = await api.user_by_login(test_username)
         if user:
+            # 检查认证状态 - 支持新旧认证系统
+            verification_status = "❌ 未认证"
+            verification_type = "none"
+            if user.verified:
+                verification_status = "✅ 传统认证"
+                verification_type = "legacy"
+            elif hasattr(user, 'blue') and user.blue:
+                verification_status = "🔵 Twitter Blue认证"
+                verification_type = "blue"
+
             user_info = {
                 'id': user.id,
                 'username': user.username,
@@ -157,16 +167,18 @@ async def test_user_functionality():
                 'following': user.friendsCount,  # 正确的属性名
                 'tweets': user.statusesCount,
                 'verified': user.verified,
+                'blue_verified': hasattr(user, 'blue') and user.blue,
+                'verification_type': verification_type,
                 'created': user.created.isoformat() if user.created else None
             }
-            
+
             print(f"✅ 用户信息获取成功:")
             print(f"   用户名: @{user_info['username']}")
             print(f"   显示名: {user_info['display_name']}")
             print(f"   粉丝数: {user_info['followers']:,}")
             print(f"   关注数: {user_info['following']:,}")
             print(f"   推文数: {user_info['tweets']:,}")
-            print(f"   认证状态: {'✅ 已认证' if user_info['verified'] else '❌ 未认证'}")
+            print(f"   认证状态: {verification_status}")
             
             return True
         else:

@@ -34,7 +34,7 @@ async def test_user_lookup():
         return False
     
     # 测试用户查找
-    test_usernames = ["wstunnel", "twitter", "elonmusk"]
+    test_usernames = ["elonmusk", "twitter", "wstunnel"]
     
     for username in test_usernames:
         print(f"\n🔍 查找用户: @{username}")
@@ -46,7 +46,15 @@ async def test_user_lookup():
                 print(f"   粉丝数: {user.followersCount:,}")
                 print(f"   关注数: {user.friendsCount:,}")
                 print(f"   推文数: {user.statusesCount:,}")
-                print(f"   认证状态: {'✅ 已认证' if user.verified else '❌ 未认证'}")
+
+                # 检查认证状态 - 支持新旧认证系统
+                verification_status = "❌ 未认证"
+                if user.verified:
+                    verification_status = "✅ 传统认证"
+                elif hasattr(user, 'blue') and user.blue:
+                    verification_status = "🔵 Twitter Blue认证"
+
+                print(f"   认证状态: {verification_status}")
                 print(f"   创建时间: {user.created}")
                 print(f"   位置: {user.location if user.location else '未设置'}")
                 return True
