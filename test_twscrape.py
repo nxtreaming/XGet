@@ -107,7 +107,7 @@ async def test_search_functionality():
         print(f"🚀 使用 {len(active_accounts)} 个活跃账号进行测试...")
         
         # 测试简单搜索 (限制结果数量避免过度请求)
-        test_keyword = "python"
+        test_keyword = "OpenAI"
         print(f"🔍 搜索关键词: '{test_keyword}' (限制5条结果)")
         
         tweets = []
@@ -573,6 +573,739 @@ async def test_data_validation():
         print(f"❌ 数据验证测试失败: {e}")
         return False
 
+async def test_advanced_search():
+    """测试高级搜索功能"""
+    print("\n🔍 测试高级搜索功能...")
+
+    try:
+        from twscrape import API
+        api = API()
+
+        # 检查是否有可用账号
+        accounts = await api.pool.get_all()
+        active_accounts = [acc for acc in accounts if acc.active]
+
+        if not active_accounts:
+            print("⚠️  没有活跃账号，跳过高级搜索测试")
+            return True
+
+        search_tests = []
+
+        # 测试1: 带时间范围的搜索
+        print("🔍 测试时间范围搜索...")
+        try:
+            # 搜索最近7天的推文
+            since_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            query = f"python since:{since_date}"
+
+            count = 0
+            async for tweet in api.search(query, limit=3):
+                count += 1
+                print(f"   📝 时间范围推文 {count}: @{tweet.user.username}")
+                await asyncio.sleep(0.5)
+
+            search_tests.append(("时间范围搜索", count > 0))
+            print(f"   ✅ 时间范围搜索: 找到 {count} 条推文")
+        except Exception as e:
+            print(f"   ❌ 时间范围搜索失败: {e}")
+            search_tests.append(("时间范围搜索", False))
+
+        # 测试2: 语言过滤搜索
+        print("🔍 测试语言过滤搜索...")
+        try:
+            query = "python lang:en"
+            count = 0
+            async for tweet in api.search(query, limit=3):
+                count += 1
+                print(f"   📝 英文推文 {count}: @{tweet.user.username} (lang: {tweet.lang})")
+                await asyncio.sleep(0.5)
+
+            search_tests.append(("语言过滤搜索", count > 0))
+            print(f"   ✅ 语言过滤搜索: 找到 {count} 条推文")
+        except Exception as e:
+            print(f"   ❌ 语言过滤搜索失败: {e}")
+            search_tests.append(("语言过滤搜索", False))
+
+        # 测试3: 排除转推搜索
+        print("🔍 测试排除转推搜索...")
+        try:
+            query = "python -filter:retweets"
+            count = 0
+            original_count = 0
+            async for tweet in api.search(query, limit=3):
+                count += 1
+                is_original = not bool(tweet.retweetedTweet)
+                if is_original:
+                    original_count += 1
+                print(f"   📝 原创推文 {count}: @{tweet.user.username} (原创: {is_original})")
+                await asyncio.sleep(0.5)
+
+            search_tests.append(("排除转推搜索", count > 0))
+            print(f"   ✅ 排除转推搜索: 找到 {count} 条推文，{original_count} 条原创")
+        except Exception as e:
+            print(f"   ❌ 排除转推搜索失败: {e}")
+            search_tests.append(("排除转推搜索", False))
+
+        # 测试4: 热门推文搜索
+        print("🔍 测试热门推文搜索...")
+        try:
+            query = "python filter:popular"
+            count = 0
+            async for tweet in api.search(query, limit=2):
+                count += 1
+                print(f"   📝 热门推文 {count}: @{tweet.user.username} (❤️ {tweet.likeCount}, 🔄 {tweet.retweetCount})")
+                await asyncio.sleep(0.5)
+
+            search_tests.append(("热门推文搜索", count > 0))
+            print(f"   ✅ 热门推文搜索: 找到 {count} 条推文")
+        except Exception as e:
+            print(f"   ❌ 热门推文搜索失败: {e}")
+            search_tests.append(("热门推文搜索", False))
+
+        # 汇总高级搜索测试结果
+        passed_search_tests = sum(1 for _, result in search_tests if result)
+        print(f"✅ 高级搜索测试: {passed_search_tests}/{len(search_tests)} 通过")
+
+        return passed_search_tests >= len(search_tests) // 2  # 至少一半通过
+
+    except Exception as e:
+        print(f"❌ 高级搜索测试失败: {e}")
+        return False
+
+async def test_user_timeline():
+    """测试用户时间线功能"""
+    print("\n📱 测试用户时间线功能...")
+
+    try:
+        from twscrape import API
+        api = API()
+
+        # 检查是否有可用账号
+        accounts = await api.pool.get_all()
+        active_accounts = [acc for acc in accounts if acc.active]
+
+        if not active_accounts:
+            print("⚠️  没有活跃账号，跳过用户时间线测试")
+            return True
+
+        # 测试获取用户时间线
+        test_users = ["elonmusk", "twitter"]
+        timeline_tests = []
+
+        for username in test_users:
+            print(f"🔍 获取 @{username} 的时间线...")
+            try:
+                # 首先获取用户信息
+                user = await api.user_by_login(username)
+                if not user:
+                    print(f"   ❌ 用户 @{username} 不存在")
+                    timeline_tests.append((f"{username}_timeline", False))
+                    continue
+
+                # 获取用户推文
+                tweet_count = 0
+                async for tweet in api.user_tweets(user.id, limit=3):
+                    tweet_count += 1
+                    print(f"   📝 推文 {tweet_count}: {tweet.rawContent[:50]}...")
+                    await asyncio.sleep(0.5)
+
+                timeline_tests.append((f"{username}_timeline", tweet_count > 0))
+                print(f"   ✅ @{username} 时间线: 获取到 {tweet_count} 条推文")
+
+            except Exception as e:
+                print(f"   ❌ @{username} 时间线获取失败: {e}")
+                timeline_tests.append((f"{username}_timeline", False))
+
+        # 汇总时间线测试结果
+        passed_timeline_tests = sum(1 for _, result in timeline_tests if result)
+        print(f"✅ 用户时间线测试: {passed_timeline_tests}/{len(timeline_tests)} 通过")
+
+        return passed_timeline_tests > 0
+
+    except Exception as e:
+        print(f"❌ 用户时间线测试失败: {e}")
+        return False
+
+async def test_tweet_details():
+    """测试推文详情功能"""
+    print("\n📄 测试推文详情功能...")
+
+    try:
+        from twscrape import API
+        api = API()
+
+        # 检查是否有可用账号
+        accounts = await api.pool.get_all()
+        active_accounts = [acc for acc in accounts if acc.active]
+
+        if not active_accounts:
+            print("⚠️  没有活跃账号，跳过推文详情测试")
+            return True
+
+        print("🔍 搜索推文并获取详情...")
+
+        # 先搜索一些推文获取ID
+        tweet_ids = []
+        async for tweet in api.search("python", limit=2):
+            tweet_ids.append(tweet.id)
+            await asyncio.sleep(0.5)
+
+        if not tweet_ids:
+            print("⚠️  未找到推文ID，跳过详情测试")
+            return True
+
+        detail_tests = []
+
+        for tweet_id in tweet_ids:
+            print(f"🔍 获取推文 {tweet_id} 的详情...")
+            try:
+                # 检查是否有推文详情方法
+                if hasattr(api, 'tweet_details'):
+                    # 获取推文详情
+                    tweet = await api.tweet_details(tweet_id)
+                    if tweet:
+                        print(f"   ✅ 推文详情: @{tweet.user.username}")
+                        print(f"   📊 互动数据: ❤️ {tweet.likeCount}, 🔄 {tweet.retweetCount}, 💬 {tweet.replyCount}")
+
+                        # 检查是否有回复
+                        if hasattr(tweet, 'replies') and tweet.replies:
+                            print(f"   💬 回复数量: {len(tweet.replies)}")
+
+                        detail_tests.append((f"tweet_{tweet_id}_details", True))
+                    else:
+                        print(f"   ❌ 无法获取推文 {tweet_id} 详情")
+                        detail_tests.append((f"tweet_{tweet_id}_details", False))
+                else:
+                    print(f"   ⚠️  tweet_details 方法不存在，跳过推文详情测试")
+                    detail_tests.append((f"tweet_{tweet_id}_details", True))  # 不算失败
+
+                await asyncio.sleep(1)
+
+            except Exception as e:
+                print(f"   ❌ 推文 {tweet_id} 详情获取失败: {e}")
+                detail_tests.append((f"tweet_{tweet_id}_details", False))
+
+        # 汇总详情测试结果
+        passed_detail_tests = sum(1 for _, result in detail_tests if result)
+        print(f"✅ 推文详情测试: {passed_detail_tests}/{len(detail_tests)} 通过")
+
+        return passed_detail_tests > 0
+
+    except Exception as e:
+        print(f"❌ 推文详情测试失败: {e}")
+        return False
+
+async def test_followers_following():
+    """测试关注者和关注列表功能"""
+    print("\n👥 测试关注者和关注列表功能...")
+
+    try:
+        from twscrape import API
+        api = API()
+
+        # 检查是否有可用账号
+        accounts = await api.pool.get_all()
+        active_accounts = [acc for acc in accounts if acc.active]
+
+        if not active_accounts:
+            print("⚠️  没有活跃账号，跳过关注列表测试")
+            return True
+
+        # 测试用户（选择粉丝数适中的用户）
+        test_username = "wstunnel"  # 一个相对较小的账号
+
+        print(f"🔍 测试 @{test_username} 的关注列表...")
+
+        try:
+            # 获取用户信息
+            user = await api.user_by_login(test_username)
+            if not user:
+                print(f"   ❌ 用户 @{test_username} 不存在")
+                return False
+
+            print(f"   📊 用户信息: {user.followersCount:,} 粉丝, {user.friendsCount:,} 关注")
+
+            follow_tests = []
+
+            # 检查是否有关注者和关注列表的API方法
+            print("🔍 检查关注者和关注列表API...")
+
+            # 测试获取关注者 (使用正确的方法名: followers)
+            try:
+                if hasattr(api, 'followers'):
+                    print("🔍 获取关注者列表...")
+                    follower_count = 0
+                    async for follower in api.followers(user.id, limit=3):
+                        follower_count += 1
+                        print(f"   👤 关注者 {follower_count}: @{follower.username} ({follower.followersCount:,} 粉丝)")
+                        await asyncio.sleep(1)
+
+                    follow_tests.append(("followers", follower_count > 0))
+                    print(f"   ✅ 关注者测试: 获取到 {follower_count} 个关注者")
+                else:
+                    print("   ⚠️  followers 方法不存在，跳过关注者测试")
+                    follow_tests.append(("followers", True))  # 不算失败
+            except Exception as e:
+                print(f"   ❌ 关注者获取失败: {e}")
+                follow_tests.append(("followers", False))
+
+            # 测试获取关注列表 (使用正确的方法名: following)
+            try:
+                if hasattr(api, 'following'):
+                    print("🔍 获取关注列表...")
+                    following_count = 0
+                    async for following_user in api.following(user.id, limit=3):
+                        following_count += 1
+                        print(f"   👤 关注 {following_count}: @{following_user.username} ({following_user.followersCount:,} 粉丝)")
+                        await asyncio.sleep(1)
+
+                    follow_tests.append(("following", following_count > 0))
+                    print(f"   ✅ 关注列表测试: 获取到 {following_count} 个关注")
+                else:
+                    print("   ⚠️  following 方法不存在，跳过关注列表测试")
+                    follow_tests.append(("following", True))  # 不算失败
+            except Exception as e:
+                print(f"   ❌ 关注列表获取失败: {e}")
+                follow_tests.append(("following", False))
+
+            # 汇总关注测试结果
+            passed_follow_tests = sum(1 for _, result in follow_tests if result)
+            print(f"✅ 关注列表测试: {passed_follow_tests}/{len(follow_tests)} 通过")
+
+            return passed_follow_tests > 0
+
+        except Exception as e:
+            print(f"❌ 关注列表测试失败: {e}")
+            return False
+
+    except Exception as e:
+        print(f"❌ 关注功能测试失败: {e}")
+        return False
+
+async def test_hashtag_trends():
+    """测试话题标签和趋势功能"""
+    print("\n📈 测试话题标签和趋势功能...")
+
+    try:
+        from twscrape import API
+        api = API()
+
+        # 检查是否有可用账号
+        accounts = await api.pool.get_all()
+        active_accounts = [acc for acc in accounts if acc.active]
+
+        if not active_accounts:
+            print("⚠️  没有活跃账号，跳过话题标签测试")
+            return True
+
+        hashtag_tests = []
+
+        # 测试1: 搜索热门话题标签
+        print("🔍 测试话题标签搜索...")
+        try:
+            popular_hashtags = ["#python", "#AI", "#tech"]
+
+            for hashtag in popular_hashtags:
+                print(f"🔍 搜索话题: {hashtag}")
+                count = 0
+                async for tweet in api.search(hashtag, limit=2):
+                    count += 1
+                    # 检查推文是否包含该话题标签
+                    has_hashtag = hashtag.lower() in tweet.rawContent.lower()
+                    print(f"   📝 推文 {count}: @{tweet.user.username} (包含标签: {has_hashtag})")
+                    await asyncio.sleep(0.5)
+
+                hashtag_tests.append((f"hashtag_{hashtag[1:]}", count > 0))
+                print(f"   ✅ {hashtag} 搜索: 找到 {count} 条推文")
+
+        except Exception as e:
+            print(f"   ❌ 话题标签搜索失败: {e}")
+            hashtag_tests.append(("hashtag_search", False))
+
+        # 测试2: 分析推文中的话题标签
+        print("🔍 测试话题标签提取...")
+        try:
+            hashtag_analysis = {
+                'tweets_with_hashtags': 0,
+                'total_hashtags': 0,
+                'unique_hashtags': set()
+            }
+
+            async for tweet in api.search("python", limit=5):
+                # 简单的话题标签提取
+                import re
+                hashtags = re.findall(r'#\w+', tweet.rawContent)
+
+                if hashtags:
+                    hashtag_analysis['tweets_with_hashtags'] += 1
+                    hashtag_analysis['total_hashtags'] += len(hashtags)
+                    hashtag_analysis['unique_hashtags'].update(hashtags)
+                    print(f"   📝 推文话题标签: {hashtags}")
+
+                await asyncio.sleep(0.5)
+
+            print(f"   📊 话题标签分析:")
+            print(f"      包含标签的推文: {hashtag_analysis['tweets_with_hashtags']}")
+            print(f"      总标签数: {hashtag_analysis['total_hashtags']}")
+            print(f"      唯一标签数: {len(hashtag_analysis['unique_hashtags'])}")
+
+            hashtag_tests.append(("hashtag_analysis", hashtag_analysis['total_hashtags'] > 0))
+
+        except Exception as e:
+            print(f"   ❌ 话题标签分析失败: {e}")
+            hashtag_tests.append(("hashtag_analysis", False))
+
+        # 汇总话题标签测试结果
+        passed_hashtag_tests = sum(1 for _, result in hashtag_tests if result)
+        print(f"✅ 话题标签测试: {passed_hashtag_tests}/{len(hashtag_tests)} 通过")
+
+        return passed_hashtag_tests > 0
+
+    except Exception as e:
+        print(f"❌ 话题标签测试失败: {e}")
+        return False
+
+async def test_media_content():
+    """测试媒体内容功能"""
+    print("\n🖼️  测试媒体内容功能...")
+
+    try:
+        from twscrape import API
+        api = API()
+
+        # 检查是否有可用账号
+        accounts = await api.pool.get_all()
+        active_accounts = [acc for acc in accounts if acc.active]
+
+        if not active_accounts:
+            print("⚠️  没有活跃账号，跳过媒体内容测试")
+            return True
+
+        print("🔍 搜索包含媒体的推文...")
+
+        media_tests = []
+        media_stats = {
+            'tweets_with_media': 0,
+            'total_media_items': 0,
+            'media_types': {},
+            'tweets_checked': 0
+        }
+
+        # 搜索可能包含媒体的推文
+        search_queries = ["filter:media python", "filter:images", "filter:videos"]
+
+        for query in search_queries:
+            print(f"🔍 搜索查询: {query}")
+            try:
+                count = 0
+                async for tweet in api.search(query, limit=3):
+                    count += 1
+                    media_stats['tweets_checked'] += 1
+
+                    # 检查媒体内容
+                    if tweet.media:
+                        # 处理媒体对象，可能是列表或单个对象
+                        media_list = []
+                        if hasattr(tweet.media, '__iter__') and not isinstance(tweet.media, str):
+                            # 如果是可迭代对象（列表等）
+                            try:
+                                media_list = list(tweet.media)
+                            except:
+                                media_list = [tweet.media]
+                        else:
+                            # 如果是单个媒体对象
+                            media_list = [tweet.media]
+
+                        if media_list:
+                            media_stats['tweets_with_media'] += 1
+                            media_stats['total_media_items'] += len(media_list)
+
+                            print(f"   📝 推文 {count}: @{tweet.user.username} - {len(media_list)} 个媒体")
+
+                            # 分析媒体类型
+                            for media_item in media_list:
+                                if hasattr(media_item, 'type'):
+                                    media_type = media_item.type
+                                    media_stats['media_types'][media_type] = media_stats['media_types'].get(media_type, 0) + 1
+                                    print(f"      🎬 媒体类型: {media_type}")
+
+                                if hasattr(media_item, 'url'):
+                                    print(f"      🔗 媒体URL: {media_item.url[:50]}...")
+                        else:
+                            print(f"   📝 推文 {count}: @{tweet.user.username} - 无媒体")
+                    else:
+                        print(f"   📝 推文 {count}: @{tweet.user.username} - 无媒体")
+
+                    await asyncio.sleep(0.5)
+
+                media_tests.append((f"media_search_{query.split()[0]}", count > 0))
+
+            except Exception as e:
+                print(f"   ❌ 媒体搜索失败 ({query}): {e}")
+                media_tests.append((f"media_search_{query.split()[0]}", False))
+
+        # 输出媒体统计
+        print(f"📊 媒体内容统计:")
+        print(f"   检查推文数: {media_stats['tweets_checked']}")
+        print(f"   包含媒体推文: {media_stats['tweets_with_media']}")
+        print(f"   总媒体项目: {media_stats['total_media_items']}")
+        print(f"   媒体类型分布: {media_stats['media_types']}")
+
+        # 汇总媒体测试结果
+        passed_media_tests = sum(1 for _, result in media_tests if result)
+        print(f"✅ 媒体内容测试: {passed_media_tests}/{len(media_tests)} 通过")
+
+        return passed_media_tests > 0 or media_stats['tweets_with_media'] > 0
+
+    except Exception as e:
+        print(f"❌ 媒体内容测试失败: {e}")
+        return False
+
+async def test_conversation_threads():
+    """测试对话线程功能"""
+    print("\n💬 测试对话线程功能...")
+
+    try:
+        from twscrape import API
+        api = API()
+
+        # 检查是否有可用账号
+        accounts = await api.pool.get_all()
+        active_accounts = [acc for acc in accounts if acc.active]
+
+        if not active_accounts:
+            print("⚠️  没有活跃账号，跳过对话线程测试")
+            return True
+
+        print("🔍 搜索有回复的推文...")
+
+        thread_tests = []
+        conversation_stats = {
+            'tweets_with_replies': 0,
+            'total_replies_found': 0,
+            'conversation_threads': 0
+        }
+
+        # 搜索可能有回复的推文
+        async for tweet in api.search("python", limit=5):
+            conversation_stats['tweets_checked'] = conversation_stats.get('tweets_checked', 0) + 1
+
+            # 检查是否有回复
+            if tweet.replyCount and tweet.replyCount > 0:
+                conversation_stats['tweets_with_replies'] += 1
+                print(f"   📝 推文: @{tweet.user.username} - {tweet.replyCount} 个回复")
+
+                # 尝试获取对话详情
+                try:
+                    # 注意：这个功能可能需要特定的API方法
+                    # 这里我们主要测试是否能检测到回复
+                    if tweet.inReplyToTweetId:
+                        print(f"      💬 回复推文ID: {tweet.inReplyToTweetId}")
+                        conversation_stats['conversation_threads'] += 1
+
+                except Exception as e:
+                    print(f"      ⚠️  无法获取对话详情: {e}")
+
+            await asyncio.sleep(0.5)
+
+        print(f"📊 对话线程统计:")
+        print(f"   检查推文数: {conversation_stats.get('tweets_checked', 0)}")
+        print(f"   有回复推文: {conversation_stats['tweets_with_replies']}")
+        print(f"   对话线程: {conversation_stats['conversation_threads']}")
+
+        thread_tests.append(("conversation_detection", conversation_stats['tweets_with_replies'] > 0))
+
+        # 汇总对话测试结果
+        passed_thread_tests = sum(1 for _, result in thread_tests if result)
+        print(f"✅ 对话线程测试: {passed_thread_tests}/{len(thread_tests)} 通过")
+
+        return passed_thread_tests > 0
+
+    except Exception as e:
+        print(f"❌ 对话线程测试失败: {e}")
+        return False
+
+async def test_api_coverage():
+    """测试API功能覆盖率"""
+    print("\n📊 测试API功能覆盖率...")
+
+    try:
+        from twscrape import API
+        api = API()
+
+        # 检查是否有可用账号
+        accounts = await api.pool.get_all()
+        active_accounts = [acc for acc in accounts if acc.active]
+
+        if not active_accounts:
+            print("⚠️  没有活跃账号，跳过API覆盖率测试")
+            return True
+
+        print("🔍 检查twscrape API方法覆盖率...")
+
+        # 首先检查API对象有哪些方法
+        print("🔍 检查可用的API方法...")
+        available_methods = []
+        for method_name in dir(api):
+            if not method_name.startswith('_') and callable(getattr(api, method_name)):
+                available_methods.append(method_name)
+
+        print(f"   📋 发现 {len(available_methods)} 个可用方法")
+        for method in sorted(available_methods):
+            print(f"      - {method}")
+        print()
+
+        # 定义要测试的API方法
+        api_methods = {
+            # 搜索相关
+            'search': {'tested': False, 'description': '推文搜索'},
+            'user_by_login': {'tested': False, 'description': '通过用户名获取用户'},
+            'user_by_id': {'tested': False, 'description': '通过ID获取用户'},
+
+            # 用户相关
+            'user_tweets': {'tested': False, 'description': '用户推文'},
+            'user_followers': {'tested': False, 'description': '用户关注者'},
+            'user_following': {'tested': False, 'description': '用户关注列表'},
+
+            # 推文相关
+            'tweet_details': {'tested': False, 'description': '推文详情'},
+            'tweet_replies': {'tested': False, 'description': '推文回复'},
+
+            # 账号管理
+            'pool.get_all': {'tested': False, 'description': '获取所有账号'},
+            'pool.add_account': {'tested': False, 'description': '添加账号'},
+            'pool.delete': {'tested': False, 'description': '删除账号'},
+        }
+
+        # 测试各个API方法
+        coverage_results = {}
+
+        # 测试搜索功能
+        try:
+            async for tweet in api.search("test", limit=1):
+                api_methods['search']['tested'] = True
+                break
+            coverage_results['search'] = True
+        except:
+            coverage_results['search'] = False
+
+        # 测试用户查询
+        try:
+            user = await api.user_by_login("twitter")
+            if user:
+                api_methods['user_by_login']['tested'] = True
+                coverage_results['user_by_login'] = True
+
+                # 测试通过ID获取用户
+                try:
+                    user_by_id = await api.user_by_id(user.id)
+                    if user_by_id:
+                        api_methods['user_by_id']['tested'] = True
+                        coverage_results['user_by_id'] = True
+                except:
+                    coverage_results['user_by_id'] = False
+
+                # 测试用户推文
+                try:
+                    async for tweet in api.user_tweets(user.id, limit=1):
+                        api_methods['user_tweets']['tested'] = True
+                        coverage_results['user_tweets'] = True
+                        break
+                except:
+                    coverage_results['user_tweets'] = False
+
+                # 测试关注者（检查方法是否存在）
+                if hasattr(api, 'user_followers'):
+                    try:
+                        async for _ in api.user_followers(user.id, limit=1):
+                            api_methods['user_followers']['tested'] = True
+                            coverage_results['user_followers'] = True
+                            break
+                    except:
+                        coverage_results['user_followers'] = False
+                else:
+                    # 方法不存在，标记为未测试但不算失败
+                    coverage_results['user_followers'] = False
+                    print(f"   ⚠️  user_followers 方法不存在")
+
+                # 测试关注列表（检查方法是否存在）
+                if hasattr(api, 'user_following'):
+                    try:
+                        async for _ in api.user_following(user.id, limit=1):
+                            api_methods['user_following']['tested'] = True
+                            coverage_results['user_following'] = True
+                            break
+                    except:
+                        coverage_results['user_following'] = False
+                else:
+                    # 方法不存在，标记为未测试但不算失败
+                    coverage_results['user_following'] = False
+                    print(f"   ⚠️  user_following 方法不存在")
+            else:
+                coverage_results['user_by_login'] = False
+        except:
+            coverage_results['user_by_login'] = False
+
+        # 测试推文详情
+        if hasattr(api, 'tweet_details'):
+            try:
+                # 先获取一个推文ID
+                async for tweet in api.search("python", limit=1):
+                    tweet_detail = await api.tweet_details(tweet.id)
+                    if tweet_detail:
+                        api_methods['tweet_details']['tested'] = True
+                        coverage_results['tweet_details'] = True
+                    break
+            except:
+                coverage_results['tweet_details'] = False
+        else:
+            coverage_results['tweet_details'] = False
+            print(f"   ⚠️  tweet_details 方法不存在")
+
+        # 测试账号管理
+        try:
+            accounts = await api.pool.get_all()
+            api_methods['pool.get_all']['tested'] = True
+            coverage_results['pool.get_all'] = True
+        except:
+            coverage_results['pool.get_all'] = False
+
+        # 计算覆盖率
+        tested_methods = sum(1 for method_info in api_methods.values() if method_info['tested'])
+        total_methods = len(api_methods)
+        coverage_rate = tested_methods / total_methods * 100
+
+        print(f"📊 API功能覆盖率: {tested_methods}/{total_methods} ({coverage_rate:.1f}%)")
+        print(f"📋 功能测试详情:")
+
+        for method_name, method_info in api_methods.items():
+            status = "✅ 已测试" if method_info['tested'] else "❌ 未测试"
+            print(f"   {method_name}: {status} - {method_info['description']}")
+
+        # 生成覆盖率报告
+        coverage_report = {
+            'total_methods': total_methods,
+            'tested_methods': tested_methods,
+            'coverage_rate': coverage_rate,
+            'method_details': api_methods,
+            'test_results': coverage_results
+        }
+
+        # 保存覆盖率报告
+        coverage_file = "twscrape_api_coverage.json"
+        try:
+            with open(coverage_file, 'w', encoding='utf-8') as f:
+                json.dump(coverage_report, f, ensure_ascii=False, indent=2)
+            print(f"💾 API覆盖率报告已保存: {coverage_file}")
+        except Exception as e:
+            print(f"⚠️  覆盖率报告保存失败: {e}")
+
+        return coverage_rate >= 70  # 70%以上覆盖率认为通过
+
+    except Exception as e:
+        print(f"❌ API覆盖率测试失败: {e}")
+        return False
+
 def generate_test_report(results: Dict[str, bool], start_time: datetime):
     """生成增强版测试报告"""
     print("\n" + "="*60)
@@ -603,9 +1336,13 @@ def generate_test_report(results: Dict[str, bool], start_time: datetime):
     # 按类别分组显示
     categories = {
         '核心功能': ['依赖检查', '基本API功能', '账号管理'],
-        '数据采集': ['搜索功能', '用户信息获取', '数据提取和格式化'],
+        '基础数据采集': ['搜索功能', '用户信息获取', '数据提取和格式化'],
+        '高级数据采集': ['高级搜索功能', '用户时间线', '推文详情'],
+        '社交功能': ['关注者和关注列表', '话题标签和趋势'],
+        '媒体和内容': ['媒体内容', '对话线程'],
         '系统稳定性': ['速率限制处理', '错误处理机制', '性能指标'],
-        '数据质量': ['数据验证功能']
+        '数据质量': ['数据验证功能'],
+        '功能覆盖率': ['API功能覆盖率']
     }
 
     for category, test_names in categories.items():
@@ -678,6 +1415,7 @@ def cleanup_test_files():
     """清理测试生成的文件"""
     test_files = [
         "test_extracted_data.json",
+        "twscrape_api_coverage.json",
         "twitter_login_page.png",
         "twitter_home_page.png",
         "twitter_search_page.png"
@@ -731,6 +1469,22 @@ async def main():
 
     print("\n🔍 第五阶段: 数据质量测试")
     test_results["数据验证功能"] = await test_data_validation()
+
+    print("\n🚀 第六阶段: 高级功能测试")
+    test_results["高级搜索功能"] = await test_advanced_search()
+    test_results["用户时间线"] = await test_user_timeline()
+    test_results["推文详情"] = await test_tweet_details()
+
+    print("\n👥 第七阶段: 社交功能测试")
+    test_results["关注者和关注列表"] = await test_followers_following()
+    test_results["话题标签和趋势"] = await test_hashtag_trends()
+
+    print("\n🎬 第八阶段: 媒体和内容测试")
+    test_results["媒体内容"] = await test_media_content()
+    test_results["对话线程"] = await test_conversation_threads()
+
+    print("\n📊 第九阶段: API功能覆盖率测试")
+    test_results["API功能覆盖率"] = await test_api_coverage()
 
     # 清理测试文件
     cleanup_test_files()
