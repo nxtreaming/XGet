@@ -48,10 +48,31 @@
 
 #### **核心采集技术**
 - **编程语言**: Python 3.12.11 (已验证) / Python 3.9+ (最低要求)
-- **主要爬取框架**: twscrape 0.17.0 (已验证) + httpx 0.28.1 (网络层)
+- **主要爬取框架**: **集成式twscrape** (基于twscrape 0.17.0定制开发)
+- **网络层**: httpx 0.28.1 (异步HTTP客户端)
 - **备用采集方案**: Apify-style Actor模式 (基于Playwright + 高级反检测)
 - **浏览器自动化**: Playwright 1.53.0 (已验证，cookies管理 + 特殊场景)
 - **查询优化**: Twitter高级搜索语法支持 (参考Apify Query Wizard)
+
+#### **🔧 twscrape集成策略**
+
+```text
+XGet项目结构
+├── src/
+│   ├── xget_core/              # 核心业务逻辑
+│   ├── xget_scraper/           # 集成的twscrape (定制版)
+│   │   ├── __init__.py
+│   │   ├── api.py              # 基于twscrape.API的增强版
+│   │   ├── models.py           # 扩展的数据模型
+│   │   ├── accounts.py         # 账号管理增强
+│   │   ├── utils.py            # 工具函数
+│   │   └── exceptions.py       # 自定义异常
+│   ├── xget_api/               # FastAPI接口
+│   └── xget_web/               # Web管理界面
+├── third_party/
+│   └── twscrape/               # 原始twscrape源码 (作为参考)
+└── requirements.txt
+```
 
 #### **系统架构组件**
 - **任务队列**: Celery + Redis (支持事件驱动定价模式)
@@ -224,6 +245,206 @@ class PricingCalculator:
             if query_count <= config["max_queries"]:
                 return tier
         return 5
+```
+
+### 🔧 **twscrape集成实施方案**
+
+#### **1. 集成方式选择**
+
+**推荐方案：Fork + 定制开发**
+
+```bash
+# 1. Fork twscrape到您的组织
+git clone https://github.com/vladkens/twscrape.git third_party/twscrape
+
+# 2. 创建定制版本
+cp -r third_party/twscrape/twscrape src/xget_scraper/
+```
+
+#### **2. 定制开发重点**
+
+```python
+# src/xget_scraper/enhanced_api.py
+from typing import Dict, List, Optional, AsyncGenerator
+from .api import API as BaseAPI
+from ..models import XGetTweet, XGetUser
+
+class XGetAPI(BaseAPI):
+    """
+    基于twscrape的增强API
+    针对甲方需求进行定制优化
+    """
+
+    def __init__(self, pool_file: str = "accounts.db"):
+        super().__init__(pool_file)
+        self.request_count = 0
+        self.success_count = 0
+        self.error_count = 0
+
+    async def search_enhanced(
+        self,
+        query: str,
+        limit: int = 20,
+        task_id: str = None,
+        **kwargs
+    ) -> AsyncGenerator[XGetTweet, None]:
+        """
+        增强的搜索功能
+        - 添加任务追踪
+        - 增强错误处理
+        - 数据格式标准化
+        """
+        try:
+            self.request_count += 1
+
+            async for tweet in self.search(query, limit, **kwargs):
+                # 转换为甲方要求的数据格式
+                xget_tweet = self._convert_to_xget_format(tweet, task_id)
+                self.success_count += 1
+                yield xget_tweet
+
+        except Exception as e:
+            self.error_count += 1
+            self.logger.error(f"Search failed for query: {query}, error: {str(e)}")
+            raise
+
+    def _convert_to_xget_format(self, tweet: Tweet, task_id: str) -> XGetTweet:
+        """
+        转换为甲方要求的20个字段格式
+        """
+        return XGetTweet(
+            # 甲方字段0: 基础信息
+            post_url=f"https://x.com/{tweet.user.username}/status/{tweet.id}",
+            post_id=str(tweet.id),
+            post_type=self._determine_post_type(tweet),
+
+            # 甲方字段1-3: 作者信息
+            author_avatar=tweet.user.profileImageUrl,
+            author_name=tweet.user.displayname,
+            author_handle=f"@{tweet.user.username}",
+
+            # 甲方字段4: 时间
+            post_time=tweet.date,
+
+            # 甲方字段5: 内容
+            post_content=tweet.rawContent,
+
+            # 甲方字段6: 媒体 (数组形式)
+            post_images=self._process_media(tweet.media),
+
+            # 甲方字段7-10, 17: 互动数据
+            comment_count=tweet.replyCount or 0,
+            retweet_count=tweet.retweetCount or 0,
+            like_count=tweet.likeCount or 0,
+            view_count=tweet.viewCount or 0,
+            bookmark_count=tweet.bookmarkCount or 0,
+
+            # 甲方字段18-19: 类型标识
+            is_retweet=bool(tweet.retweetedTweet),
+            is_quote=bool(tweet.quotedTweet),
+
+            # 甲方字段11-16: 转发帖信息
+            **self._process_retweet_info(tweet),
+
+            # 甲方字段20: 链接信息
+            post_links=self._extract_links(tweet),
+
+            # 甲方要求的关系字段
+            parent_post_id=tweet.inReplyToTweetId,
+            parent_comment_id=tweet.inReplyToUserId,
+
+            # 系统字段
+            task_id=task_id,
+            collected_at=datetime.utcnow(),
+
+            # 甲方要求保留原始数据
+            raw_data={
+                "twscrape_tweet": tweet.dict(),
+                "collection_method": "xget_enhanced_twscrape"
+            }
+        )
+
+    async def get_account_health(self) -> Dict:
+        """
+        获取账号池健康状态
+        """
+        accounts = await self.pool.accounts()
+
+        health_stats = {
+            "total_accounts": len(accounts),
+            "active_accounts": 0,
+            "suspended_accounts": 0,
+            "error_accounts": 0,
+            "request_stats": {
+                "total_requests": self.request_count,
+                "successful_requests": self.success_count,
+                "failed_requests": self.error_count,
+                "success_rate": self.success_count / max(self.request_count, 1)
+            }
+        }
+
+        for account in accounts:
+            if account.active:
+                health_stats["active_accounts"] += 1
+            elif "suspended" in str(account.status).lower():
+                health_stats["suspended_accounts"] += 1
+            else:
+                health_stats["error_accounts"] += 1
+
+        return health_stats
+```
+
+#### **3. 版本管理策略**
+
+```python
+# src/xget_scraper/__init__.py
+"""
+XGet定制版twscrape
+基于twscrape 0.17.0定制开发
+
+版本管理：
+- 上游版本: twscrape 0.17.0
+- XGet版本: 1.0.0
+- 最后同步: 2024-01-01
+"""
+
+__version__ = "1.0.0"
+__upstream_version__ = "0.17.0"
+__last_sync__ = "2024-01-01"
+
+from .enhanced_api import XGetAPI
+from .models import XGetTweet, XGetUser
+
+__all__ = ["XGetAPI", "XGetTweet", "XGetUser"]
+```
+
+#### **4. 升级和维护策略**
+
+```bash
+# scripts/sync_upstream.sh
+#!/bin/bash
+# 同步上游twscrape更新的脚本
+
+echo "开始同步上游twscrape..."
+
+# 1. 获取最新的twscrape
+cd third_party/twscrape
+git pull origin main
+
+# 2. 检查变更
+git log --oneline --since="2024-01-01" > ../../docs/upstream_changes.log
+
+# 3. 创建合并分支
+cd ../../
+git checkout -b sync-upstream-$(date +%Y%m%d)
+
+# 4. 手动合并关键更新
+echo "请手动检查 docs/upstream_changes.log 并合并必要的更新"
+echo "重点关注："
+echo "- API接口变更"
+echo "- 数据模型变更"
+echo "- 错误处理改进"
+echo "- 性能优化"
 ```
 
 ### 必要的生产组件
