@@ -42,13 +42,21 @@
 
 ## 技术栈选择
 
-### 核心技术组件
+### 🚀 **基于Apify架构优化的技术栈**
+
+参考Apify Twitter Scraper的成功经验，我们采用以下优化的技术组合：
+
+#### **核心采集技术**
 - **编程语言**: Python 3.12.11 (已验证) / Python 3.9+ (最低要求)
-- **爬取框架**: twscrape 0.17.0 (已验证) + httpx 0.28.1 (网络层)
+- **主要爬取框架**: twscrape 0.17.0 (已验证) + httpx 0.28.1 (网络层)
+- **备用采集方案**: Apify-style Actor模式 (基于Playwright + 高级反检测)
 - **浏览器自动化**: Playwright 1.53.0 (已验证，cookies管理 + 特殊场景)
-- **任务队列**: Celery + Redis
+- **查询优化**: Twitter高级搜索语法支持 (参考Apify Query Wizard)
+
+#### **系统架构组件**
+- **任务队列**: Celery + Redis (支持事件驱动定价模式)
 - **数据存储**: MongoDB (文档存储) + Redis (缓存/会话)
-- **API框架**: FastAPI + Uvicorn
+- **API框架**: FastAPI + Uvicorn (高性能异步API)
 - **配置管理**: Pydantic Settings + 环境变量
 - **日志系统**: Structured Logging (JSON格式)
 - **监控**: Prometheus + Grafana (可选)
@@ -60,6 +68,163 @@
 - **📊 数据采集**: 已验证可获取真实数据
 - **🎭 浏览器自动化**: 全功能验证通过
 - **🚀 开发就绪**: 可立即开始项目开发
+
+### 🎯 **Apify-inspired 查询优化器**
+
+基于Apify Twitter Scraper的成功经验，实现智能查询优化：
+
+```python
+# services/query_optimizer.py
+class TwitterQueryOptimizer:
+    """
+    基于Apify经验的查询优化器
+    支持Twitter高级搜索语法，提高采集效率和成本控制
+    """
+
+    def optimize_profile_scraping(self, username: str, date_ranges: List[Tuple]) -> List[str]:
+        """
+        优化用户资料采集 - 分时间段查询
+        参考Apify建议：每月最多800条推文，需要分段查询
+        """
+        queries = []
+        for start_date, end_date in date_ranges:
+            query = f"from:{username} since:{start_date} until:{end_date}"
+            queries.append(query)
+        return queries
+
+    def build_advanced_search(self, keyword: str, filters: Dict) -> str:
+        """
+        构建高级搜索查询 - 支持Apify-style的复杂过滤条件
+        参考: https://github.com/igorbrigadir/twitter-advanced-search
+        """
+        query_parts = [keyword]
+
+        # 媒体过滤 (Apify支持的过滤器)
+        if filters.get('only_images'):
+            query_parts.append('filter:images')
+        elif filters.get('only_videos'):
+            query_parts.append('filter:videos')
+        elif filters.get('exclude_images'):
+            query_parts.append('-filter:images')
+
+        # 互动过滤
+        if filters.get('min_likes'):
+            query_parts.append(f"min_faves:{filters['min_likes']}")
+        if filters.get('min_retweets'):
+            query_parts.append(f"min_retweets:{filters['min_retweets']}")
+
+        # 用户类型过滤
+        if filters.get('only_verified'):
+            query_parts.append('filter:verified')
+        if filters.get('only_blue_verified'):
+            query_parts.append('filter:blue_verified')
+        if filters.get('exclude_retweets'):
+            query_parts.append('-filter:nativeretweets')
+
+        # 语言过滤
+        if filters.get('language'):
+            query_parts.append(f"lang:{filters['language']}")
+
+        return ' '.join(query_parts)
+
+    def generate_conversation_queries(self, tweet_id: str, hashtag: str = None) -> List[str]:
+        """
+        生成对话查询 - 获取推文回复
+        """
+        base_query = f"conversation_id:{tweet_id}"
+        if hashtag:
+            base_query += f" #{hashtag}"
+        return [base_query]
+
+    def optimize_batch_queries(self, queries: List[str]) -> Dict[str, List[str]]:
+        """
+        批量查询优化 - 根据Apify定价模型优化查询分组
+        """
+        # 按查询复杂度分组，优化成本
+        simple_queries = []
+        complex_queries = []
+
+        for query in queries:
+            if len(query.split()) <= 3:
+                simple_queries.append(query)
+            else:
+                complex_queries.append(query)
+
+        return {
+            "simple_batch": simple_queries,
+            "complex_batch": complex_queries
+        }
+```
+
+### 💰 **事件驱动定价模型**
+
+参考Apify的透明定价策略，为甲方提供灵活的成本控制：
+
+```python
+# services/pricing_calculator.py
+class PricingCalculator:
+    """
+    基于Apify模式的事件驱动定价计算器
+    """
+
+    # 基础定价 (参考Apify模型)
+    QUERY_COSTS = {
+        "standard_query": 0.016,      # 标准查询 (包含前2页约40条推文)
+        "single_tweet": 0.05,         # 单条推文查询
+        "profile_query": 0.016,       # 用户资料查询
+        "search_query": 0.016         # 搜索查询
+    }
+
+    # 分层定价 (按批次大小)
+    TIER_PRICING = {
+        1: {"max_queries": 5, "cost_per_item": 0.0004},      # ≤5查询
+        2: {"max_queries": 10, "cost_per_item": 0.0008},     # 6-10查询
+        3: {"max_queries": 30, "cost_per_item": 0.0012},     # 11-30查询
+        4: {"max_queries": 100, "cost_per_item": 0.0016},    # 31-100查询
+        5: {"max_queries": float('inf'), "cost_per_item": 0.002}  # >100查询
+    }
+
+    def calculate_task_cost(self, task_params: Dict) -> Dict[str, float]:
+        """
+        计算任务成本
+        """
+        task_type = task_params.get("type")
+        query_count = task_params.get("query_count", 1)
+        expected_items = task_params.get("expected_items", 0)
+
+        # 基础查询成本
+        if task_type == "single_tweet":
+            base_cost = self.QUERY_COSTS["single_tweet"]
+        else:
+            base_cost = self.QUERY_COSTS["standard_query"] * query_count
+
+        # 确定定价层级
+        tier = self._get_pricing_tier(query_count)
+
+        # 计算数据项成本 (超出免费额度的部分)
+        free_items = min(query_count * 40, expected_items)  # 每查询40条免费
+        paid_items = max(0, expected_items - free_items)
+
+        item_cost = paid_items * self.TIER_PRICING[tier]["cost_per_item"]
+
+        total_cost = base_cost + item_cost
+
+        return {
+            "base_cost": base_cost,
+            "item_cost": item_cost,
+            "total_cost": total_cost,
+            "tier": tier,
+            "free_items": free_items,
+            "paid_items": paid_items
+        }
+
+    def _get_pricing_tier(self, query_count: int) -> int:
+        """确定定价层级"""
+        for tier, config in self.TIER_PRICING.items():
+            if query_count <= config["max_queries"]:
+                return tier
+        return 5
+```
 
 ### 必要的生产组件
 - **代理IP管理** - 生产环境必需
@@ -278,10 +443,224 @@ class XGetManager:
 
 ## 核心模块设计
 
-### 1. 数据采集模块
+### 🎯 **基于Apify最佳实践的模块架构**
+
+参考Apify Twitter Scraper的成功架构，我们设计了以下优化模块：
+
+### 1. 智能数据采集模块 (Smart Scraping Module)
+
+**技术栈**: twscrape + httpx + Playwright + Apify-style优化
+**核心职责**: 高效稳定的X平台数据采集，支持高级查询优化
+
+#### 🚀 **Apify-inspired 查询优化**
 
 ```python
-# core/scraper.py
+# core/smart_scraper.py
+class SmartScrapingEngine:
+    """
+    基于Apify经验的智能采集引擎
+    支持高级查询、成本优化和反检测
+    """
+
+    def __init__(self):
+        self.query_optimizer = TwitterQueryOptimizer()
+        self.pricing_calculator = PricingCalculator()
+        self.rate_limiter = AdaptiveRateLimiter()
+
+    async def execute_optimized_search(self, task_params: Dict) -> Dict:
+        """
+        执行优化的搜索任务 - 参考Apify的查询优化策略
+        """
+        # 1. 查询优化 (Apify-style)
+        if task_params["type"] == "profile_scraping":
+            queries = self._optimize_profile_queries(task_params)
+        else:
+            queries = self._build_advanced_search_queries(task_params)
+
+        # 2. 成本预估 (透明定价)
+        cost_estimate = self.pricing_calculator.calculate_task_cost({
+            "type": task_params["type"],
+            "query_count": len(queries),
+            "expected_items": task_params.get("required_count", 1000)
+        })
+
+        # 3. 执行采集
+        results = []
+        for query in queries:
+            batch_result = await self._execute_single_query(query, task_params)
+            results.extend(batch_result)
+
+            # 检查是否达到甲方要求的条数
+            if (task_params.get("required_count", 0) > 0 and
+                len(results) >= task_params["required_count"]):
+                break
+
+        return {
+            "results": results,
+            "cost_info": cost_estimate,
+            "queries_executed": len(queries),
+            "total_collected": len(results)
+        }
+
+    def _optimize_profile_queries(self, task_params: Dict) -> List[str]:
+        """
+        优化用户资料查询 - 参考Apify分时间段策略
+        每月最多800条推文，需要分段查询
+        """
+        username = task_params["username"]
+
+        # 生成月度时间范围
+        date_ranges = self._generate_monthly_ranges(
+            task_params.get("start_time"),
+            task_params.get("end_time")
+        )
+
+        return [f"from:{username} since:{start} until:{end}"
+                for start, end in date_ranges]
+
+    def _build_advanced_search_queries(self, task_params: Dict) -> List[str]:
+        """
+        构建高级搜索查询 - 支持Apify-style复杂过滤
+        参考: https://github.com/igorbrigadir/twitter-advanced-search
+        """
+        keyword = task_params["keyword"]
+        filters = {
+            "only_images": task_params.get("only_images", False),
+            "only_videos": task_params.get("only_videos", False),
+            "only_verified": task_params.get("only_verified", False),
+            "min_likes": task_params.get("min_likes"),
+            "language": task_params.get("language")
+        }
+
+        # 使用查询优化器构建复杂查询
+        optimized_query = self.query_optimizer.build_advanced_search(keyword, filters)
+
+        # 如果有时间范围，分段查询 (提高成功率)
+        if task_params.get("start_time") and task_params.get("end_time"):
+            date_ranges = self._generate_date_ranges(
+                task_params["start_time"],
+                task_params["end_time"]
+            )
+            return [f"{optimized_query} since:{start} until:{end}"
+                   for start, end in date_ranges]
+
+        return [optimized_query]
+```
+
+#### 📊 **Apify-style 数据处理器**
+
+```python
+# core/data_processor.py
+class ApifyStyleDataProcessor:
+    """
+    基于Apify输出格式的数据处理器
+    确保数据格式与甲方需求完全匹配
+    """
+
+    def process_tweet_data(self, raw_tweet: Dict, task_info: Dict) -> Dict:
+        """
+        处理推文数据 - 完全按照甲方20个字段要求
+        参考Apify的详细输出格式
+        """
+        processed = {
+            # 甲方字段0: 基础信息
+            "post_url": f"https://x.com/{raw_tweet['user']['username']}/status/{raw_tweet['id']}",
+            "post_id": raw_tweet["id"],
+            "post_type": self._determine_post_type(raw_tweet),
+
+            # 甲方字段1-3: 作者信息
+            "author_avatar": raw_tweet["user"].get("profilePicture", ""),
+            "author_name": raw_tweet["user"].get("name", ""),
+            "author_handle": f"@{raw_tweet['user'].get('userName', '')}",
+
+            # 甲方字段4: 时间
+            "post_time": self._parse_twitter_date(raw_tweet.get("createdAt")),
+
+            # 甲方字段5: 内容
+            "post_content": raw_tweet.get("text", ""),
+
+            # 甲方字段6: 媒体 (数组形式，如Apify)
+            "post_images": self._process_media_array(raw_tweet.get("extendedEntities", {})),
+
+            # 甲方字段7-10, 17: 互动数据
+            "comment_count": raw_tweet.get("replyCount", 0),
+            "retweet_count": raw_tweet.get("retweetCount", 0),
+            "like_count": raw_tweet.get("likeCount", 0),
+            "view_count": raw_tweet.get("viewCount", 0),
+            "bookmark_count": raw_tweet.get("bookmarkCount", 0),
+
+            # 甲方字段18-19: 类型标识
+            "is_retweet": raw_tweet.get("isRetweet", False),
+            "is_quote": raw_tweet.get("isQuote", False),
+
+            # 甲方字段11-16: 转发帖信息
+            **self._process_retweet_data(raw_tweet),
+
+            # 甲方字段20: 链接信息
+            "post_links": self._extract_links(raw_tweet),
+
+            # 甲方要求的关系字段
+            "parent_post_id": raw_tweet.get("inReplyToStatusId"),
+            "parent_comment_id": raw_tweet.get("inReplyToUserId"),
+
+            # 系统字段
+            "oss_file_path": None,  # 后续OSS上传时填充
+            "collected_at": datetime.utcnow().isoformat(),
+            "keyword": task_info.get("keyword"),
+            "task_id": task_info.get("task_id"),
+
+            # 甲方要求保留原始数据
+            "raw_data": {
+                "twitter_api_response": raw_tweet,
+                "collection_method": "twscrape_optimized",
+                "apify_style_processing": True
+            }
+        }
+
+        return processed
+
+    def _process_media_array(self, extended_entities: Dict) -> List[Dict]:
+        """
+        处理媒体数组 - 参考Apify的详细媒体信息
+        """
+        media_list = []
+
+        for media in extended_entities.get("media", []):
+            media_item = {
+                "original_url": media.get("media_url_https", ""),
+                "oss_url": None,  # 后续OSS上传时填充
+                "type": "video_cover" if media.get("type") == "video" else "image",
+                "width": media.get("original_info", {}).get("width"),
+                "height": media.get("original_info", {}).get("height")
+            }
+
+            # 视频特殊处理 (参考Apify视频信息)
+            if media.get("video_info"):
+                media_item.update({
+                    "video_duration": media["video_info"].get("duration_millis"),
+                    "video_variants": media["video_info"].get("variants", [])
+                })
+
+            media_list.append(media_item)
+
+        return media_list
+
+    def _determine_post_type(self, raw_tweet: Dict) -> str:
+        """
+        确定帖子类型 - 参考Apify的类型分类
+        """
+        if raw_tweet.get("isRetweet"):
+            return "retweet"
+        elif raw_tweet.get("isQuote"):
+            return "quote"
+        elif raw_tweet.get("extendedEntities", {}).get("media"):
+            media_types = [m.get("type") for m in raw_tweet["extendedEntities"]["media"]]
+            if "video" in media_types:
+                return "video"
+            elif "photo" in media_types:
+                return "image"
+        return "text"
+```
 import asyncio
 import random
 from twscrape import API
@@ -5045,11 +5424,46 @@ curl -X GET "http://localhost:8000/api/v1/admin/health"
 3. **稳定性** - 完善的错误处理和监控
 4. **标准化** - 统一的数据格式和API规范
 
+### 💡 **Apify经验集成优势**
+
+基于Apify Twitter Scraper的成功经验，我们的方案具有以下优势：
+
+#### **🎯 查询优化**
+- **高级搜索语法** - 支持复杂的Twitter查询语法
+- **智能分段查询** - 自动优化大量数据采集
+- **成本控制** - 透明的事件驱动定价模型
+
+#### **📊 数据质量**
+- **完整字段映射** - 严格按照甲方20个字段要求
+- **媒体处理** - 支持图片、视频的完整信息
+- **原始数据保留** - 满足甲方原始数据要求
+
+#### **⚡ 性能优化**
+- **批量处理** - 支持大规模数据采集
+- **智能重试** - 自动处理失败和限流
+- **资源管理** - 高效的账号和代理轮换
+
+#### **💰 成本效益**
+- **透明定价** - 参考Apify的事件驱动模型
+- **查询优化** - 减少不必要的API调用
+- **批量折扣** - 大量采集时的成本优势
+
 ### 🚀 **实施建议**
 
 1. **立即开始Twitter核心功能** - 技术风险可控，可以立即实施
 2. **分阶段交付** - 每个阶段都有可用的功能
 3. **严格按需求实施** - 确保每个功能都符合甲方要求
 4. **预留扩展接口** - 为后续多平台扩展做好准备
+5. **借鉴Apify最佳实践** - 采用经过验证的架构和优化策略
 
-这个方案完全基于甲方需求文档设计，确保了业务需求的100%覆盖和技术实现的可行性。
+### 📈 **预期效果**
+
+基于Apify Twitter Scraper的成功案例，我们的XGet系统预期能够实现：
+
+- **采集效率**: 每秒处理49-64条推文 (参考Apify性能)
+- **成本控制**: 透明的$0.0004/条推文定价模型
+- **稳定性**: >99%的运行成功率
+- **可扩展性**: 支持无限量数据采集
+- **合规性**: 完全符合甲方业务需求
+
+这个方案完全基于甲方需求文档设计，并融合了Apify Twitter Scraper的成功经验，确保了业务需求的100%覆盖和技术实现的可行性。
