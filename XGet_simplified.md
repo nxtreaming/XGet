@@ -1,15 +1,44 @@
-# XGet 实施方案
+# XGet 社媒搜索采集系统 - 生产就绪版本
 
 ## 项目概述
 
-基于对原方案的分析，这是一个平衡了功能完整性和实施复杂度的X(Twitter)数据采集系统方案。在保持核心功能完整的同时，避免过度设计，确保生产环境的稳定性和可扩展性。
+基于甲方需求文档，这是一个专业的X(Twitter)数据采集系统，提供关键词搜索、数据解析、资源下载和API接口服务。系统支持定时搜索和按需搜索两种模式，完整实现甲乙双方的数据交互需求。
+
+### 🎯 **核心业务需求**
+
+1. **关键词搜索采集** - 支持多语言关键词的X平台搜索
+2. **双模式任务** - 定时搜索 + 按需搜索
+3. **完整数据解析** - 帖子、作者、媒体、互动数据
+4. **资源下载管理** - 图片/视频下载到OSS
+5. **标准API接口** - 任务下发、结果上报、数据统计
+6. **数据去重统计** - 按关键词月度去重计量
+
+### 📋 **甲方需求分析**
+
+#### **搜索任务类型**
+1. **定时搜索任务**
+   - 参数：关键词、优先级、搜索频率
+   - 按频率和优先级自动执行
+
+2. **按需搜索任务**
+   - 参数：关键词、优先级、需要条数、开始时间、结束时间
+   - 条数=0时尽力采集，≠0时达到目标后结束
+
+#### **数据字段要求**
+- **基础帖子信息**：地址、ID、类型、内容、时间
+- **作者信息**：头像、名字、handle
+- **互动数据**：评论数、转发数、点赞数、曝光数、bookmark
+- **媒体资源**：图片、视频封面（数组形式）
+- **转发帖特殊字段**：原贴信息、关系标识
+- **其他字段**：链接、OSS地址、原始数据
 
 ## 核心原则
 
-1. **生产就绪优先** - 包含生产环境必需的关键组件
-2. **技术栈平衡** - 使用成熟稳定的技术组合，但保留必要的复杂性
-3. **模块化架构** - 单体应用但模块清晰，支持后续微服务拆分
-4. **渐进式扩展** - 支持功能和架构的平滑升级
+1. **业务需求驱动** - 严格按照甲方需求文档实现
+2. **API标准化** - 提供标准的任务下发和结果上报接口
+3. **数据完整性** - 确保所有必需字段的准确采集
+4. **资源管理** - 完整的图片/视频下载和OSS存储
+5. **可扩展架构** - 支持后续Facebook、Instagram等平台
 
 ## 技术栈选择
 
@@ -3317,57 +3346,87 @@ CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
 #### 📊 **核心数据集合**
 
 ```javascript
-// 推文集合 (tweets)
+// 推文集合 (tweets) - 完全按照甲方需求字段设计
 {
   "_id": ObjectId("..."),
-  "tweet_id": "1234567890123456789",  // Twitter推文ID
-  "text": "推文内容...",
-  "user": {
-    "user_id": "987654321",
-    "username": "example_user",
-    "display_name": "示例用户",
-    "verified": false,
-    "followers_count": 1000
+
+  // 基础信息 (甲方字段0)
+  "post_url": "https://x.com/0xairdropfarmer/status/1940603123074228282",
+  "post_id": "1940603123074228282",  // 从URL中提取的ID
+  "post_type": "text",  // text/image/video/retweet/quote
+
+  // 作者信息 (甲方字段1-3)
+  "author_avatar": "https://pbs.twimg.com/profile_images/...",
+  "author_name": "示例用户",
+  "author_handle": "@example_user",
+
+  // 时间信息 (甲方字段4)
+  "post_time": ISODate("2024-01-01T12:00:00Z"),
+
+  // 内容信息 (甲方字段5)
+  "post_content": "推文内容...",
+
+  // 媒体资源 (甲方字段6) - 数组形式
+  "post_images": [
+    {
+      "original_url": "https://pbs.twimg.com/media/...",
+      "oss_url": "https://oss.example.com/images/2024/01/01/img_001.jpg",
+      "type": "image",  // image/video_cover
+      "width": 1200,
+      "height": 800
+    }
+  ],
+
+  // 互动数据 (甲方字段7-10, 17)
+  "comment_count": 25,
+  "retweet_count": 50,
+  "like_count": 100,
+  "view_count": 5000,
+  "bookmark_count": 15,
+
+  // 转发帖特殊字段 (甲方字段11-16, 18-19)
+  "is_retweet": false,
+  "is_quote": false,
+  "original_post_id": null,
+  "original_author_avatar": null,
+  "original_author_name": null,
+  "original_author_handle": null,
+  "original_post_time": null,
+  "original_post_content": null,
+  "original_post_images": [],
+
+  // 链接信息 (甲方字段20)
+  "post_links": [
+    {
+      "url": "https://t.co/abc123",
+      "expanded_url": "https://example.com/article",
+      "display_url": "example.com/article"
+    }
+  ],
+
+  // OSS文件地址 (甲方要求)
+  "oss_file_path": "data/2024/01/01/task_20240101_001_batch_001.json",
+
+  // 甲方要求的Post关系
+  "parent_post_id": null,
+  "parent_comment_id": null,
+
+  // 原始数据 (甲方要求保留Twitter原始数据)
+  "raw_data": {
+    "twitter_api_response": "原始API响应数据...",
+    "collection_method": "twscrape",
+    "raw_json": "完整的原始JSON数据"
   },
-  "metrics": {
-    "like_count": 100,
-    "retweet_count": 50,
-    "reply_count": 25,
-    "quote_count": 10,
-    "view_count": 5000
-  },
-  "content": {
-    "hashtags": ["#python", "#ai"],
-    "mentions": ["@user1", "@user2"],
-    "urls": [
-      {
-        "url": "https://t.co/abc123",
-        "expanded_url": "https://example.com/article",
-        "display_url": "example.com/article"
-      }
-    ],
-    "media": [
-      {
-        "type": "photo",
-        "url": "https://pbs.twimg.com/media/...",
-        "width": 1200,
-        "height": 800
-      }
-    ]
-  },
+
+  // 系统元数据
   "metadata": {
-    "created_at": ISODate("2024-01-01T12:00:00Z"),
     "collected_at": ISODate("2024-01-01T12:05:00Z"),
+    "search_keyword": "人工智能",  // 采集关键词
+    "task_id": "task_20240101_001",
     "source_account": "account_001",
     "source_proxy": "proxy_001",
-    "collection_method": "search",
-    "search_keyword": "python programming"
-  },
-  "processing": {
-    "sentiment_score": 0.8,
-    "language": "zh",
-    "topics": ["technology", "programming"],
-    "processed_at": ISODate("2024-01-01T12:06:00Z")
+    "batch_id": "batch_001",
+    "collection_method": "search"  // search/timeline/profile
   }
 }
 
@@ -3405,40 +3464,66 @@ CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
   }
 }
 
-// 采集任务集合 (collection_tasks)
+// 采集任务集合 (collection_tasks) - 按甲方需求设计
 {
   "_id": ObjectId("..."),
-  "task_id": "task_20240101_001",
-  "type": "search",  // search, user_timeline, user_profile
+  "task_id": "task_20240101_001",  // 甲方要求的任务ID
+
+  // 任务类型 (甲方两种搜索模式)
+  "task_type": "scheduled",  // scheduled(定时搜索) / ondemand(按需搜索)
+
+  // 甲方主要参数
   "parameters": {
-    "keyword": "python programming",
-    "count": 1000,
-    "date_range": {
-      "start": ISODate("2024-01-01T00:00:00Z"),
-      "end": ISODate("2024-01-01T23:59:59Z")
-    }
+    "keyword": "人工智能",  // 关键词 (支持中文、英文、小语种)
+    "priority": 1,         // 优先级 (1-10, 1最高)
+
+    // 定时搜索参数
+    "frequency": "daily",      // 搜索频率 (仅定时任务)
+    "frequency_count": 3,      // 每日搜索次数 (仅定时任务)
+
+    // 按需搜索参数
+    "required_count": 1000,    // 需要的条数 (0=尽力采集, 仅按需任务)
+    "start_time": ISODate("2024-01-01T00:00:00Z"),  // 开始时间 (仅按需任务)
+    "end_time": ISODate("2024-01-01T23:59:59Z"),    // 结束时间 (仅按需任务)
   },
+
+  // 任务状态
   "status": "completed",  // pending, running, completed, failed, cancelled
+
+  // 执行进度
   "progress": {
-    "total": 1000,
-    "collected": 856,
-    "failed": 12,
-    "percentage": 85.6
+    "target_count": 1000,      // 目标数量
+    "collected_count": 856,    // 已采集数量
+    "failed_count": 12,        // 失败数量
+    "percentage": 85.6,        // 完成百分比
+    "current_batch": 9,        // 当前批次
+    "total_batches": 10        // 总批次数
   },
+
+  // 资源分配
   "resources": {
     "assigned_accounts": ["account_001", "account_002"],
     "used_proxies": ["proxy_001", "proxy_002"],
     "worker_id": "worker_001"
   },
+
+  // 时间信息
   "timing": {
     "created_at": ISODate("2024-01-01T10:00:00Z"),
     "started_at": ISODate("2024-01-01T10:01:00Z"),
     "completed_at": ISODate("2024-01-01T12:00:00Z"),
-    "duration_seconds": 7140
+    "duration_seconds": 7140,
+    "next_execution": ISODate("2024-01-02T10:00:00Z")  // 仅定时任务
   },
+
+  // 执行结果
   "results": {
-    "tweets_collected": 856,
-    "users_discovered": 234,
+    "posts_collected": 856,
+    "unique_posts": 834,       // 去重后数量
+    "duplicate_posts": 22,     // 重复数量
+    "images_downloaded": 245,  // 下载的图片数
+    "oss_files_created": 9,    // 创建的OSS文件数
+    "data_reported": true,     // 是否已上报给甲方
     "errors": [
       {
         "type": "rate_limit",
@@ -3446,6 +3531,21 @@ CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
         "last_occurrence": ISODate("2024-01-01T11:30:00Z")
       }
     ]
+  },
+
+  // 甲方上报信息
+  "reporting": {
+    "batches_reported": [
+      {
+        "batch_id": "batch_001",
+        "oss_file_path": "data/2024/01/01/task_20240101_001_batch_001.json",
+        "post_count": 100,
+        "reported_at": ISODate("2024-01-01T11:00:00Z"),
+        "report_status": "success"
+      }
+    ],
+    "total_reported": 856,
+    "last_report_at": ISODate("2024-01-01T12:00:00Z")
   }
 }
 
@@ -3560,6 +3660,516 @@ db.accounts.createIndex({ "health.score": -1 })
 db.proxies.createIndex({ "proxy_id": 1 }, { unique: true })
 db.proxies.createIndex({ "status": 1 })
 db.proxies.createIndex({ "performance.success_rate": -1 })
+```
+
+## 业务API接口设计
+
+### 甲乙双方接口规范
+
+基于甲方需求文档，设计标准化的API接口体系，实现任务下发、数据上报和统计查询。
+
+#### 🔄 **接口交互流程**
+
+```text
+甲方 ──────────────────────────────────────────────────── 乙方(XGet系统)
+  │                                                      │
+  ├─ 1. 搜索任务下发接口1 (定时搜索) ──────────────────────→ │
+  ├─ 2. 搜索任务下发接口2 (按需搜索) ──────────────────────→ │
+  │                                                      │
+  │                                                      ├─ 3. 执行搜索采集
+  │                                                      ├─ 4. 数据解析处理
+  │                                                      ├─ 5. 资源下载到OSS
+  │                                                      │
+  ├─ 6. 搜索结果上报接口 ←──────────────────────────────── │
+  ├─ 7. 数据统计查询接口 ←──────────────────────────────── │
+```
+
+#### 📤 **乙方提供的接口 (甲方调用)**
+
+##### **1. 定时搜索任务下发接口**
+```python
+# POST /api/v1/tasks/scheduled
+{
+    "keyword": "人工智能",           # 关键词 (支持中文、英文、小语种)
+    "priority": 1,                  # 优先级 (1-10, 1最高)
+    "frequency": "daily",           # 搜索频率 (daily/hourly/weekly)
+    "frequency_count": 3,           # 每日搜索次数
+    "task_id": "task_20240101_001"  # 任务ID
+}
+
+# 响应
+{
+    "status": "success",
+    "task_id": "task_20240101_001",
+    "message": "定时搜索任务创建成功",
+    "next_execution": "2024-01-01T08:00:00Z"
+}
+```
+
+##### **2. 按需搜索任务下发接口**
+```python
+# POST /api/v1/tasks/ondemand
+{
+    "keyword": "ChatGPT",           # 关键词
+    "priority": 2,                  # 优先级
+    "required_count": 1000,         # 需要的条数 (0=尽力采集)
+    "start_time": "2024-01-01T00:00:00Z",  # 开始时间
+    "end_time": "2024-01-01T23:59:59Z",    # 结束时间
+    "task_id": "task_20240101_002"  # 任务ID
+}
+
+# 响应
+{
+    "status": "success",
+    "task_id": "task_20240101_002",
+    "message": "按需搜索任务创建成功",
+    "estimated_completion": "2024-01-01T12:00:00Z"
+}
+```
+
+##### **3. 任务状态查询接口**
+```python
+# GET /api/v1/tasks/{task_id}/status
+{
+    "task_id": "task_20240101_001",
+    "status": "running",            # pending/running/completed/failed
+    "progress": {
+        "collected": 856,           # 已采集数量
+        "target": 1000,            # 目标数量
+        "percentage": 85.6         # 完成百分比
+    },
+    "created_at": "2024-01-01T08:00:00Z",
+    "updated_at": "2024-01-01T10:30:00Z"
+}
+```
+
+#### 📥 **甲方提供的接口 (乙方调用)**
+
+##### **4. 搜索结果上报接口**
+```python
+# POST {甲方提供的上报URL}
+{
+    "post_id": "1940603123074228282",    # 帖子ID
+    "keyword": "人工智能",                # 关键词
+    "task_id": "task_20240101_001",      # 任务ID
+    "oss_file_path": "data/2024/01/01/task_20240101_001_batch_001.json",
+    "batch_size": 100,                   # 本批次数据量
+    "total_collected": 856,              # 累计采集量
+    "completion_status": "partial"       # partial/completed
+}
+
+# 甲方响应
+{
+    "status": "received",
+    "message": "数据接收成功",
+    "next_batch_allowed": true
+}
+```
+
+### 数据格式规范
+
+#### 📊 **标准数据字段定义**
+
+根据甲方需求，定义完整的数据字段结构：
+
+```python
+# 标准帖子数据结构
+{
+    # 基础信息 (字段0)
+    "post_url": "https://x.com/0xairdropfarmer/status/1940603123074228282",
+    "post_id": "1940603123074228282",
+    "post_type": "text",  # text/image/video/retweet/quote
+
+    # 作者信息 (字段1-3)
+    "author_avatar": "https://pbs.twimg.com/profile_images/...",
+    "author_name": "示例用户",
+    "author_handle": "@example_user",
+
+    # 时间信息 (字段4)
+    "post_time": "2024-01-01T12:00:00Z",
+
+    # 内容信息 (字段5)
+    "post_content": "这是一条示例推文内容...",
+
+    # 媒体资源 (字段6)
+    "post_images": [
+        {
+            "original_url": "https://pbs.twimg.com/media/...",
+            "oss_url": "https://oss.example.com/images/2024/01/01/img_001.jpg",
+            "type": "image",
+            "width": 1200,
+            "height": 800
+        }
+    ],
+
+    # 互动数据 (字段7-10)
+    "comment_count": 25,
+    "retweet_count": 50,
+    "like_count": 100,
+    "view_count": 5000,
+    "bookmark_count": 15,  # 字段17
+
+    # 转发帖特殊字段 (字段11-16)
+    "is_retweet": false,        # 字段18
+    "is_quote": false,          # 字段19
+    "original_post_id": null,
+    "original_author_avatar": null,
+    "original_author_name": null,
+    "original_author_handle": null,
+    "original_post_time": null,
+    "original_post_content": null,
+    "original_post_images": [],
+
+    # 链接信息 (字段20)
+    "post_links": [
+        {
+            "url": "https://t.co/abc123",
+            "expanded_url": "https://example.com/article",
+            "display_url": "example.com/article"
+        }
+    ],
+
+    # 系统字段
+    "oss_file_path": "data/2024/01/01/post_1940603123074228282.json",
+    "collected_at": "2024-01-01T12:05:00Z",
+    "keyword": "人工智能",
+    "task_id": "task_20240101_001",
+
+    # 原始数据 (甲方要求)
+    "raw_data": {
+        "twitter_api_response": "原始API响应数据..."
+    },
+
+    # 关系字段 (甲方要求的Post关系)
+    "parent_post_id": null,
+    "parent_comment_id": null
+}
+```
+
+### OSS资源管理
+
+#### 📁 **文件存储规范**
+
+根据甲方要求，实现图片和数据文件的OSS存储管理：
+
+```python
+# OSS存储结构
+oss_bucket/
+├── images/                    # 图片资源
+│   ├── 2024/01/01/           # 按日期分目录
+│   │   ├── img_001.jpg
+│   │   ├── img_002.png
+│   │   └── video_001_cover.jpg
+│   └── ...
+├── videos/                    # 视频封面
+│   ├── 2024/01/01/
+│   └── ...
+├── data/                      # JSON数据文件
+│   ├── 2024/01/01/
+│   │   ├── task_20240101_001_batch_001.json
+│   │   ├── task_20240101_001_batch_002.json
+│   │   └── ...
+│   └── ...
+└── raw_data/                  # 原始数据备份
+    ├── 2024/01/01/
+    └── ...
+```
+
+#### 🔧 **OSS上传服务**
+
+```python
+# services/oss_service.py
+import asyncio
+import aiofiles
+from datetime import datetime
+from typing import List, Dict, Optional
+import hashlib
+import os
+
+class OSSService:
+    """OSS资源管理服务"""
+
+    def __init__(self, oss_config: Dict):
+        self.bucket_name = oss_config["bucket_name"]
+        self.endpoint = oss_config["endpoint"]
+        self.access_key = oss_config["access_key"]
+        self.secret_key = oss_config["secret_key"]
+        self.base_url = f"https://{self.bucket_name}.{self.endpoint}"
+
+    async def upload_image(self, image_url: str, task_id: str) -> Dict[str, str]:
+        """上传图片到OSS"""
+        try:
+            # 下载图片
+            image_data = await self._download_media(image_url)
+
+            # 生成OSS路径
+            date_path = datetime.now().strftime("%Y/%m/%d")
+            file_hash = hashlib.md5(image_data).hexdigest()[:8]
+            file_ext = self._get_file_extension(image_url)
+            oss_path = f"images/{date_path}/{task_id}_{file_hash}{file_ext}"
+
+            # 上传到OSS
+            oss_url = await self._upload_to_oss(oss_path, image_data, "image")
+
+            return {
+                "original_url": image_url,
+                "oss_url": oss_url,
+                "oss_path": oss_path,
+                "file_size": len(image_data)
+            }
+
+        except Exception as e:
+            self.logger.error(f"图片上传失败: {image_url}, 错误: {str(e)}")
+            return {
+                "original_url": image_url,
+                "oss_url": None,
+                "error": str(e)
+            }
+
+    async def upload_data_file(self, data: Dict, task_id: str, batch_id: str) -> str:
+        """上传JSON数据文件到OSS"""
+        try:
+            # 生成文件路径
+            date_path = datetime.now().strftime("%Y/%m/%d")
+            filename = f"{task_id}_batch_{batch_id}.json"
+            oss_path = f"data/{date_path}/{filename}"
+
+            # 转换为JSON字符串
+            import json
+            json_data = json.dumps(data, ensure_ascii=False, indent=2).encode('utf-8')
+
+            # 上传到OSS
+            oss_url = await self._upload_to_oss(oss_path, json_data, "application/json")
+
+            return oss_url
+
+        except Exception as e:
+            self.logger.error(f"数据文件上传失败: {task_id}, 错误: {str(e)}")
+            raise
+
+    async def batch_upload_images(self, image_urls: List[str], task_id: str) -> List[Dict]:
+        """批量上传图片"""
+        tasks = [self.upload_image(url, task_id) for url in image_urls]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        return [
+            result if not isinstance(result, Exception) else {"error": str(result)}
+            for result in results
+        ]
+```
+
+### 数据统计服务
+
+#### 📊 **月度去重统计**
+
+根据甲方要求，实现按关键词的月度去重数据统计：
+
+```python
+# services/statistics_service.py
+from datetime import datetime, timedelta
+from typing import Dict, List
+import calendar
+
+class StatisticsService:
+    """数据统计服务"""
+
+    def __init__(self, db_client):
+        self.db = db_client.xget
+        self.logger = logging.getLogger(__name__)
+
+    async def get_monthly_stats_by_keyword(
+        self,
+        keyword: str,
+        year: int,
+        month: int
+    ) -> Dict[str, int]:
+        """按关键词获取月度去重统计"""
+        try:
+            # 计算月份时间范围
+            start_date = datetime(year, month, 1)
+            if month == 12:
+                end_date = datetime(year + 1, 1, 1)
+            else:
+                end_date = datetime(year, month + 1, 1)
+
+            # 聚合查询 - 按帖子ID去重
+            pipeline = [
+                {
+                    "$match": {
+                        "metadata.search_keyword": keyword,
+                        "metadata.collected_at": {
+                            "$gte": start_date,
+                            "$lt": end_date
+                        }
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": "$tweet_id",  # 按帖子ID去重
+                        "first_collected": {"$min": "$metadata.collected_at"},
+                        "keyword": {"$first": "$metadata.search_keyword"}
+                    }
+                },
+                {
+                    "$group": {
+                        "_id": None,
+                        "unique_posts": {"$sum": 1},
+                        "keywords": {"$addToSet": "$keyword"}
+                    }
+                }
+            ]
+
+            result = await self.db.tweets.aggregate(pipeline).to_list(length=1)
+
+            if result:
+                return {
+                    "keyword": keyword,
+                    "year": year,
+                    "month": month,
+                    "unique_posts_count": result[0]["unique_posts"],
+                    "period": f"{year}-{month:02d}",
+                    "calculated_at": datetime.utcnow().isoformat()
+                }
+            else:
+                return {
+                    "keyword": keyword,
+                    "year": year,
+                    "month": month,
+                    "unique_posts_count": 0,
+                    "period": f"{year}-{month:02d}",
+                    "calculated_at": datetime.utcnow().isoformat()
+                }
+
+        except Exception as e:
+            self.logger.error(f"月度统计计算失败: {keyword}, {year}-{month}, 错误: {str(e)}")
+            raise
+
+    async def get_all_keywords_monthly_stats(
+        self,
+        year: int,
+        month: int
+    ) -> List[Dict]:
+        """获取所有关键词的月度统计"""
+        try:
+            # 获取该月份所有关键词
+            start_date = datetime(year, month, 1)
+            if month == 12:
+                end_date = datetime(year + 1, 1, 1)
+            else:
+                end_date = datetime(year, month + 1, 1)
+
+            keywords = await self.db.tweets.distinct(
+                "metadata.search_keyword",
+                {
+                    "metadata.collected_at": {
+                        "$gte": start_date,
+                        "$lt": end_date
+                    }
+                }
+            )
+
+            # 为每个关键词计算统计
+            stats = []
+            for keyword in keywords:
+                keyword_stats = await self.get_monthly_stats_by_keyword(keyword, year, month)
+                stats.append(keyword_stats)
+
+            return stats
+
+        except Exception as e:
+            self.logger.error(f"全量月度统计失败: {year}-{month}, 错误: {str(e)}")
+            raise
+
+    async def get_task_completion_stats(self, task_id: str) -> Dict:
+        """获取任务完成统计"""
+        try:
+            task = await self.db.collection_tasks.find_one({"task_id": task_id})
+            if not task:
+                return {"error": "任务不存在"}
+
+            # 统计该任务采集的数据
+            collected_count = await self.db.tweets.count_documents({
+                "metadata.task_id": task_id
+            })
+
+            # 去重统计
+            unique_posts = await self.db.tweets.distinct(
+                "tweet_id",
+                {"metadata.task_id": task_id}
+            )
+
+            return {
+                "task_id": task_id,
+                "total_collected": collected_count,
+                "unique_posts": len(unique_posts),
+                "duplicate_rate": (collected_count - len(unique_posts)) / collected_count if collected_count > 0 else 0,
+                "task_status": task["status"],
+                "keyword": task["parameters"].get("keyword"),
+                "created_at": task["timing"]["created_at"].isoformat(),
+                "completed_at": task["timing"].get("completed_at", {}).isoformat() if task["timing"].get("completed_at") else None
+            }
+
+        except Exception as e:
+            self.logger.error(f"任务统计失败: {task_id}, 错误: {str(e)}")
+            raise
+```
+
+#### 📈 **统计API接口**
+
+```python
+# api/routes/statistics.py
+from fastapi import APIRouter, Query, Depends
+from typing import List, Optional
+from datetime import datetime
+from ..services import StatisticsService
+
+router = APIRouter(prefix="/api/v1/statistics", tags=["数据统计"])
+
+@router.get("/monthly/{keyword}")
+async def get_keyword_monthly_stats(
+    keyword: str,
+    year: int = Query(..., description="年份"),
+    month: int = Query(..., ge=1, le=12, description="月份"),
+    token: str = Depends(verify_token)
+):
+    """获取关键词月度去重统计"""
+    try:
+        stats_service = StatisticsService(db_client)
+        stats = await stats_service.get_monthly_stats_by_keyword(keyword, year, month)
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"统计查询失败: {str(e)}")
+
+@router.get("/monthly/all")
+async def get_all_monthly_stats(
+    year: int = Query(..., description="年份"),
+    month: int = Query(..., ge=1, le=12, description="月份"),
+    token: str = Depends(verify_token)
+):
+    """获取所有关键词月度统计"""
+    try:
+        stats_service = StatisticsService(db_client)
+        stats = await stats_service.get_all_keywords_monthly_stats(year, month)
+        return {
+            "period": f"{year}-{month:02d}",
+            "total_keywords": len(stats),
+            "statistics": stats
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"统计查询失败: {str(e)}")
+
+@router.get("/tasks/{task_id}")
+async def get_task_stats(
+    task_id: str,
+    token: str = Depends(verify_token)
+):
+    """获取任务完成统计"""
+    try:
+        stats_service = StatisticsService(db_client)
+        stats = await stats_service.get_task_completion_stats(task_id)
+        return stats
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"任务统计失败: {str(e)}")
 ```
 
 ## API服务设计
@@ -4299,37 +4909,147 @@ curl -X GET "http://localhost:8000/api/v1/admin/health"
 }
 ```
 
+## 后续扩展需求
+
+### 🚀 **甲方后续需求规划**
+
+根据甲方需求文档，系统需要支持多平台扩展：
+
+#### 📘 **Facebook 扩展需求**
+
+```python
+# Facebook用户数据结构
+{
+  "platform": "facebook",
+  "user_id": "facebook_user_123",
+  "user_details": {
+    "name": "用户名称",
+    "avatar": "头像URL",
+    "description": "用户简介",
+    "gender": "性别",
+    "friends_count": 1500,  # 好友数
+    "location": {
+      "country": "中国",
+      "city": "北京"
+    }
+  },
+  "posts": {
+    "post_id": "facebook_post_456",
+    "content": "帖文内容",
+    "like_list": [  # 点赞列表
+      {"user_id": "user1", "name": "用户1"},
+      {"user_id": "user2", "name": "用户2"}
+    ],
+    "share_list": [  # 转发列表
+      {"user_id": "user3", "name": "用户3"},
+      {"user_id": "user4", "name": "用户4"}
+    ]
+  }
+}
+```
+
+#### 🐦 **Twitter 扩展需求**
+
+```python
+# Twitter扩展数据结构
+{
+  "platform": "twitter",
+  "extended_features": {
+    "search_terms": ["搜索词1", "搜索词2"],  # 搜索词功能
+    "retweet_lists": {
+      "direct_retweets": [  # 直接转推列表
+        {"user_id": "user1", "retweet_time": "2024-01-01T12:00:00Z"}
+      ],
+      "quote_retweets": [   # 引用转推列表
+        {
+          "user_id": "user2",
+          "quote_content": "引用内容",
+          "quote_time": "2024-01-01T12:30:00Z"
+        }
+      ]
+    }
+  }
+}
+```
+
+#### 📸 **Instagram 扩展需求**
+
+```python
+# Instagram数据结构
+{
+  "platform": "instagram",
+  "user_id": "instagram_user_789",
+  "user_details": {
+    "username": "用户名",
+    "display_name": "显示名称",
+    "avatar": "头像URL",
+    "bio": "个人简介",
+    "location": {
+      "country": "美国",
+      "city": "纽约"
+    }
+  },
+  "posts": {
+    "post_id": "instagram_post_101",
+    "content": "帖文内容",
+    "media_type": "image",  # image/video/carousel
+    "like_list": [  # 点赞列表
+      {"user_id": "user5", "username": "user5_name"}
+    ]
+  },
+  "search_terms": ["搜索词A", "搜索词B"]  # 搜索词功能
+}
+```
+
+### 📊 **实施优先级**
+
+#### **第一阶段 (当前)：Twitter核心功能**
+- ✅ 关键词搜索采集
+- ✅ 双模式任务系统
+- ✅ 完整数据解析
+- ✅ OSS资源管理
+- ✅ API接口体系
+
+#### **第二阶段：Twitter扩展功能**
+- 🔄 搜索词管理
+- 🔄 转推列表采集
+- 🔄 引用转推分析
+- 🔄 高级数据分析
+
+#### **第三阶段：Facebook集成**
+- 📋 用户详情采集
+- 📋 好友关系分析
+- 📋 帖文互动列表
+- 📋 地理位置数据
+
+#### **第四阶段：Instagram集成**
+- 📋 视觉内容采集
+- 📋 用户地理数据
+- 📋 互动列表分析
+- 📋 搜索词功能
+
 ## 总结
 
-这个方案相比原方案的优势：
+### ✅ **完全符合甲方需求**
 
-### ✅ 保留的关键功能
+1. **业务需求100%覆盖** - 所有甲方要求的功能都已设计
+2. **数据字段完整对应** - 严格按照甲方20个字段要求
+3. **API接口标准化** - 提供甲乙双方完整的接口规范
+4. **OSS资源管理** - 完整的图片下载和存储方案
+5. **数据统计去重** - 按关键词月度去重统计
+
+### 🎯 **技术实现优势**
 
 1. **生产就绪** - 包含生产环境必需组件
-2. **可扩展性** - 支持后续功能扩展
+2. **可扩展性** - 支持多平台后续扩展
 3. **稳定性** - 完善的错误处理和监控
-4. **可维护性** - 清晰的模块划分
+4. **标准化** - 统一的数据格式和API规范
 
-### 🎉 技术验证成果
+### 🚀 **实施建议**
 
-1. **100% 技术可行性确认** - 所有核心技术已验证
-2. **关键技术突破** - Playwright cookies自动化方案
-3. **真实数据验证** - 成功获取Twitter真实数据
-4. **分层架构验证** - 技术分工明确，协作高效
-5. **开发环境就绪** - 可立即开始正式开发
-
-### ✅ 简化的部分
-
-1. **技术栈** - 减少非必需技术组件
-2. **架构复杂度** - 避免过早的微服务拆分
-3. **企业级功能** - 推迟到业务验证后
-4. **开发周期** - 6-8周完成生产版本
-
-### 🎯 建议
-
-这个方案既保证了生产环境的稳定性和可扩展性，又避免了过度设计的复杂性。建议：
-
-1. **立即开始** - 技术风险可控，可以立即开始实施
+1. **立即开始Twitter核心功能** - 技术风险可控，可以立即实施
 2. **分阶段交付** - 每个阶段都有可用的功能
-3. **持续优化** - 在使用过程中根据实际需求优化
-4. **业务驱动** - 根据业务价值决定后续功能优先级
+3. **严格按需求实施** - 确保每个功能都符合甲方要求
+4. **预留扩展接口** - 为后续多平台扩展做好准备
+
+这个方案完全基于甲方需求文档设计，确保了业务需求的100%覆盖和技术实现的可行性。
